@@ -22,13 +22,9 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   exit 1
 fi
 
-# shellcheck source=/dev/null
-source "${CONDA_SH}"
-conda activate "${VENV_DIR}"
-module load python/miniforge3_pytorch/2.10.0
-
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
+PYTHON="${VENV_DIR}/bin/python"
 
 echo "============================================================"
 echo "CleanDiffuser GPU smoke test"
@@ -36,7 +32,7 @@ echo "============================================================"
 echo "hostname: $(hostname)"
 echo "repo: ${REPO_DIR}"
 echo "venv: ${VENV_DIR}"
-echo "python: $(which python)"
+echo "python: ${PYTHON}"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "============================================================"
 
@@ -46,6 +42,6 @@ else
   echo "nvidia-smi not found"
 fi
 
-python scripts/gpu_smoke_test.py
+"${PYTHON}" scripts/gpu_smoke_test.py
 
 echo "Smoke test job completed."
