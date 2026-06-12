@@ -11,6 +11,7 @@ from cleandiffuser.utils import (
     at_least_ndim,
     SUPPORTED_NOISE_SCHEDULES, SUPPORTED_DISCRETIZATIONS, SUPPORTED_SAMPLING_STEP_SCHEDULE)
 from .basic import DiffusionModel
+from .guidance import compute_guided_model_input, validate_guidance_config
 
 SUPPORTED_SOLVERS = [
     "ddpm", "ddim",
@@ -227,10 +228,22 @@ class BaseDiffusionSDE(DiffusionModel):
             model,
             condition_cfg=None, w_cfg: float = 0.0,
             condition_cg=None, w_cg: float = 0.0,
-            requires_grad: bool = False):
+            requires_grad: bool = False,
+            prior=None,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0):
         """
         One-step epsilon/x0 prediction with guidance.
         """
+        validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
+
+        if guidance_mode == "optimization":
+            x_query, logp = compute_guided_model_input(
+                xt, t, self.classifier, condition_cg, self.fix_mask, prior,
+                guidance_mode, optimization_guidance_scale)
+            pred = self.classifier_free_guidance(
+                x_query, t, model, condition_cfg, w_cfg, None, None, requires_grad)
+            return pred, logp
 
         pred = self.classifier_free_guidance(
             xt, t, model, condition_cfg, w_cfg, None, None, requires_grad)
@@ -415,6 +428,8 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             w_cfg: float = 0.0,
             condition_cg=None,
             w_cg: float = 0.0,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -530,7 +545,9 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             # guided sampling
             pred, logp = self.guided_sampling(
                 xt, t, alphas[i], sigmas[i],
-                model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad)
+                model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
+                prior=prior, guidance_mode=guidance_mode,
+                optimization_guidance_scale=optimization_guidance_scale)
 
             # clip the prediction
             pred = self.clip_prediction(pred, xt, alphas[i], sigmas[i])
@@ -757,6 +774,8 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             w_cfg: float = 0.0,
             condition_cg=None,
             w_cg: float = 0.0,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -876,7 +895,9 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             # guided sampling
             pred, logp = self.guided_sampling(
                 xt, t, alphas[i], sigmas[i],
-                model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad)
+                model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
+                prior=prior, guidance_mode=guidance_mode,
+                optimization_guidance_scale=optimization_guidance_scale)
 
             # clip the prediction
             pred = self.clip_prediction(pred, xt, alphas[i], sigmas[i])

@@ -139,7 +139,11 @@ def pipeline(args):
                     solver=args.solver,
                     n_samples=args.num_candidates * args.num_envs,
                     sample_steps=args.sampling_steps,
-                    use_ema=args.use_ema, w_cg=args.task.w_cg, temperature=args.temperature)
+                    use_ema=args.use_ema,
+                    w_cg=args.task.w_cg,
+                    guidance_mode=args.guidance_mode,
+                    optimization_guidance_scale=args.optimization_guidance_scale,
+                    temperature=args.temperature)
 
                 # select the best plan
                 logp = log["log_p"].view(args.num_candidates, args.num_envs, -1).sum(-1)

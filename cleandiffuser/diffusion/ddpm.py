@@ -12,6 +12,7 @@ from cleandiffuser.utils import (
     cosine_beta_schedule,
     linear_beta_schedule)
 from .basic import DiffusionModel
+from .guidance import compute_guided_model_input, validate_guidance_config
 
 
 class DDPM(DiffusionModel):
@@ -123,9 +124,17 @@ class DDPM(DiffusionModel):
             # ----------------- CG ----------------- #
             condition_vec_cg=None,
             w_cg: float = 1.0,
+            prior=None,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
     ):
         b = x.shape[0]
         model = self.model_ema if use_ema else self.model
+
+        validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
+        x_query, log_p = compute_guided_model_input(
+            x, t, self.classifier, condition_vec_cg, self.fix_mask, prior,
+            guidance_mode, optimization_guidance_scale)
 
         # ----------------- CFG ----------------- #
         with torch.set_grad_enabled(requires_grad):
@@ -133,21 +142,26 @@ class DDPM(DiffusionModel):
                 repeat_dim = [2 if i == 0 else 1 for i in range(x.dim())]
                 condition_vec_cfg = torch.cat([condition_vec_cfg, torch.zeros_like(condition_vec_cfg)], 0)
                 pred = model["diffusion"](
-                    x.repeat(*repeat_dim), t.repeat(2), condition_vec_cfg)
+                    x_query.repeat(*repeat_dim), t.repeat(2), condition_vec_cfg)
                 pred = w_cfg * pred[:b] + (1. - w_cfg) * pred[b:]
             elif w_cfg == 0.0:
-                pred = model["diffusion"](x, t, None)
+                pred = model["diffusion"](x_query, t, None)
             else:
-                pred = model["diffusion"](x, t, condition_vec_cfg)
+                pred = model["diffusion"](x_query, t, condition_vec_cfg)
 
         # ----------------- CG ----------------- #
-        if self.classifier is not None and w_cg != 0.0 and condition_vec_cg is not None:
-            log_p, grad = self.classifier.gradients(x.clone(), t, condition_vec_cg)
+        if (
+            guidance_mode == "standard"
+            and self.classifier is not None
+            and w_cg != 0.0
+            and condition_vec_cg is not None
+        ):
+            _, grad = self.classifier.gradients(x.clone(), t, condition_vec_cg)
             if self.predict_noise:
                 pred = pred - w_cg * (1 - bar_alpha).sqrt() * grad
             else:
                 pred = pred + w_cg * (1 - bar_alpha) / bar_alpha.sqrt() * grad
-        else:
+        elif log_p is None:
             log_p = None
 
         if self.predict_noise:
@@ -180,6 +194,8 @@ class DDPM(DiffusionModel):
             w_cfg: float = 0.0,
             condition_cg=None,
             w_cg: float = 0.0,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
             # ------------------ others ------------------ #
             requires_grad: bool = False,
             preserve_history: bool = False,
@@ -224,7 +240,10 @@ class DDPM(DiffusionModel):
                 requires_grad=requires_grad,
                 condition_vec_cfg=condition_vec_cfg,
                 condition_vec_cg=condition_vec_cg,
-                w_cfg=w_cfg, w_cg=w_cg)
+                w_cfg=w_cfg, w_cg=w_cg,
+                prior=prior,
+                guidance_mode=guidance_mode,
+                optimization_guidance_scale=optimization_guidance_scale)
 
             # one step denoise
             if self.predict_noise:
@@ -269,6 +288,8 @@ class DDPM(DiffusionModel):
             w_cfg: float = 0.0,
             condition_cg=None,
             w_cg: float = 0.0,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
             # ------------------ others ------------------ #
             requires_grad: bool = False,
             preserve_history: bool = False,
@@ -313,7 +334,10 @@ class DDPM(DiffusionModel):
                 requires_grad=requires_grad,
                 condition_vec_cfg=condition_vec_cfg,
                 condition_vec_cg=condition_vec_cg,
-                w_cfg=w_cfg, w_cg=w_cg)
+                w_cfg=w_cfg, w_cg=w_cg,
+                prior=prior,
+                guidance_mode=guidance_mode,
+                optimization_guidance_scale=optimization_guidance_scale)
 
             # one step denoise
             if self.predict_noise:
@@ -350,7 +374,10 @@ class DDPM(DiffusionModel):
                     requires_grad=requires_grad,
                     condition_vec_cfg=condition_vec_cfg,
                     condition_vec_cg=condition_vec_cg,
-                    w_cfg=w_cfg, w_cg=w_cg)
+                    w_cfg=w_cfg, w_cg=w_cg,
+                    prior=prior,
+                    guidance_mode=guidance_mode,
+                    optimization_guidance_scale=optimization_guidance_scale)
 
                 # one step denoise
                 if self.predict_noise:

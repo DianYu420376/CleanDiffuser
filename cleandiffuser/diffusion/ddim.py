@@ -10,6 +10,7 @@ from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.nn_diffusion import BaseNNDiffusion
 from cleandiffuser.utils import at_least_ndim
 from .basic import DiffusionModel
+from .guidance import compute_guided_model_input, validate_guidance_config
 
 
 class DDIM(DiffusionModel):
@@ -123,6 +124,8 @@ class DDIM(DiffusionModel):
             w_cfg: float = 0.0,
             condition_cg=None,
             w_cg: float = 0.0,
+            guidance_mode: str = "standard",
+            optimization_guidance_scale: float = 0.0,
 
             preserve_history: bool = False,
     ):
@@ -148,28 +151,38 @@ class DDIM(DiffusionModel):
             condition_vec_cfg = model["condition"](condition_cfg, mask_cfg) if condition_cfg is not None else None
             condition_vec_cg = condition_cg
 
+        validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
+
         for i in range(sample_steps):
 
             h = logSNRs[i + 1] - logSNRs[i]
 
             t_batch = t[i].repeat(n_samples)
 
+            x_query, log_p = compute_guided_model_input(
+                xt, t_batch, self.classifier, condition_vec_cg, self.fix_mask, prior,
+                guidance_mode, optimization_guidance_scale)
+
             # ----------------- CFG ----------------- #
             with torch.no_grad():
                 if w_cfg != 0.0 and w_cfg != 1.0:
                     condition_vec_cfg = torch.cat([condition_vec_cfg, torch.zeros_like(condition_vec_cfg)], 0)
                     eps_theta = model["diffusion"](
-                        torch.repeat_interleave(xt, 2, dim=0),
+                        torch.repeat_interleave(x_query, 2, dim=0),
                         torch.repeat_interleave(t_batch, 2, dim=0),
                         condition_vec_cfg)
                     eps_theta = w_cfg * eps_theta[:n_samples] + (1. - w_cfg) * eps_theta[n_samples:]
                 else:
-                    eps_theta = model["diffusion"](xt, t_batch, condition_vec_cfg)
+                    eps_theta = model["diffusion"](x_query, t_batch, condition_vec_cfg)
             # ----------------- CG ----------------- #
-            if self.classifier is not None and w_cg != 0.0:
-                log_p, grad = self.classifier.gradients(xt.clone(), t_batch, condition_vec_cg)
+            if (
+                guidance_mode == "standard"
+                and self.classifier is not None
+                and w_cg != 0.0
+            ):
+                _, grad = self.classifier.gradients(xt.clone(), t_batch, condition_vec_cg)
                 eps_theta = eps_theta - w_cg * sigmas[i] * grad
-            else:
+            elif log_p is None:
                 log_p = None
 
             # do not change the fixed portion

@@ -6,6 +6,17 @@ pipeline_name: diffuser_d4rl_mujoco
 mode: train
 seed: 0
 device: cuda:0
+# Optional subdirectory under results/<pipeline>/<task>/ to avoid overwriting prior runs.
+run_suffix: ""
+# Optional override for offline HDF5 (e.g. Hopper-v4 reroll dataset).
+dataset_h5path: null
+
+# WandB
+enable_wandb: false
+wandb_mode: online
+project: CleanDiffuser
+group: diffuser_d4rl_mujoco
+name: default
 
 # Environment
 terminal_penalty: -100
@@ -34,6 +45,21 @@ num_episodes: 3
 num_candidates: 64
 temperature: 0.5
 use_ema: True
+guidance_mode: standard
+optimization_guidance_scale: 0.0
+# Optional JSON path for structured inference metrics (set by comparison eval scripts).
+eval_output: null
+
+# Rendering (mode=render, or mode=inference with render_video=true)
+sim_env_name: null
+render_video: false
+video_dir: video_outputs
+render_fps: 30
+render_width: 480
+render_height: 480
+max_render_steps: 1000
+render_reset_on_done: false
+render_ignore_termination: true
 
 # hydra
 hydra:

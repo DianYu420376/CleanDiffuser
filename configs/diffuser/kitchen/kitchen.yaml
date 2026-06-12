@@ -33,6 +33,8 @@ num_episodes: 3
 num_candidates: 64
 temperature: 0.5
 use_ema: True
+guidance_mode: standard
+optimization_guidance_scale: 0.0
 
 # hydra
 hydra:
