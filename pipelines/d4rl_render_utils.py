@@ -19,7 +19,7 @@ GymEnv = Union[gym.Env, object]
 D4RL_MUJOCO_TO_GYMNASIUM = {
     "halfcheetah": "HalfCheetah-v4",
     "walker2d": "Walker2d-v4",
-    "hopper": "Hopper-v2-compat",
+    "hopper": "Hopper-v4",
     "ant": "Ant-v4",
 }
 
@@ -82,8 +82,7 @@ def make_sim_eval_env(
     sim_name = D4RL_MUJOCO_TO_GYMNASIUM[agent]
     print(
         f"[render] Task `{d4rl_task_name}` is offline-only; "
-        f"using sim env `{sim_name}` for rollout "
-        f"(legacy Gym hopper control + MuJoCo-3-converted hopper.xml)."
+        f"using sim env `{sim_name}` for rollout."
     )
     return _make_env(
         sim_name,

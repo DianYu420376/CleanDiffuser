@@ -51,6 +51,7 @@ optimization_guidance_scale: 0.0
 eval_output: null
 
 # Rendering (mode=render, or mode=inference with render_video=true)
+# null = auto-map offline D4RL tasks (hopper -> Hopper-v4, etc.)
 sim_env_name: null
 render_video: false
 video_dir: video_outputs

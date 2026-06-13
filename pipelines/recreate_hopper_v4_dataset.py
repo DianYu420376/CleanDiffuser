@@ -90,30 +90,67 @@ def _rollout_episode(
     init_qpos: np.ndarray,
     init_qvel: np.ndarray,
     ignore_termination: bool,
-) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Roll one episode segment; returns arrays for [start, end] inclusive."""
+    source_timeout_at_end: bool,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    bool,
+    bool,
+]:
+    """Roll one source episode; optionally truncate when Hopper-v4 terminates."""
     env = _make_hopper_v4_env(ignore_termination)
     env.reset()
     unwrapped = env.unwrapped
     unwrapped.set_state(np.asarray(init_qpos, dtype=np.float64), np.asarray(init_qvel, dtype=np.float64))
 
-    length = end - start + 1
-    observations = np.empty((length, 11), dtype=np.float32)
-    next_observations = np.empty((length, 11), dtype=np.float32)
-    rewards = np.empty(length, dtype=np.float32)
-    qpos_out = np.empty((length, 6), dtype=np.float64)
-    qvel_out = np.empty((length, 6), dtype=np.float64)
+    max_len = end - start + 1
+    observations = []
+    next_observations = []
+    rewards = []
+    qpos_out = []
+    qvel_out = []
+    act_out = []
+    terminated_early = False
 
-    for local_idx, global_idx in enumerate(range(start, end + 1)):
-        qpos_out[local_idx] = np.array(unwrapped.data.qpos, dtype=np.float64)
-        qvel_out[local_idx] = np.array(unwrapped.data.qvel, dtype=np.float64)
-        observations[local_idx] = np.asarray(unwrapped._get_obs(), dtype=np.float32)
-        next_obs, reward, _, _, _ = env.step(np.asarray(actions[global_idx], dtype=np.float32))
-        next_observations[local_idx] = np.asarray(next_obs, dtype=np.float32)
-        rewards[local_idx] = np.float32(reward)
+    for global_idx in range(start, end + 1):
+        qpos_out.append(np.array(unwrapped.data.qpos, dtype=np.float64))
+        qvel_out.append(np.array(unwrapped.data.qvel, dtype=np.float64))
+        observations.append(np.asarray(unwrapped._get_obs(), dtype=np.float32))
+        act_out.append(np.asarray(actions[global_idx], dtype=np.float32))
+        next_obs, reward, terminated, truncated, _ = env.step(actions[global_idx])
+        next_observations.append(np.asarray(next_obs, dtype=np.float32))
+        rewards.append(np.float32(reward))
+        if not ignore_termination and (terminated or truncated):
+            terminated_early = True
+            break
 
     env.close()
-    return start, end + 1, observations, next_observations, rewards, qpos_out, qvel_out
+
+    n = len(observations)
+    terminals = np.zeros(n, dtype=bool)
+    timeouts = np.zeros(n, dtype=bool)
+    if n > 0:
+        if terminated_early:
+            terminals[-1] = True
+        elif source_timeout_at_end:
+            timeouts[-1] = True
+
+    return (
+        np.stack(observations, axis=0),
+        np.stack(next_observations, axis=0),
+        np.asarray(rewards, dtype=np.float32),
+        np.stack(qpos_out, axis=0),
+        np.stack(qvel_out, axis=0),
+        np.stack(act_out, axis=0),
+        terminals,
+        timeouts,
+        terminated_early,
+    )
 
 
 def _rollout_episode_packed(args: tuple) -> tuple:
@@ -125,8 +162,17 @@ def _rollout_episode_packed(args: tuple) -> tuple:
         init_qpos,
         init_qvel,
         ignore_termination,
+        source_timeout_at_end,
     ) = args
-    return _rollout_episode(start, end, actions, init_qpos, init_qvel, ignore_termination)
+    return _rollout_episode(
+        start,
+        end,
+        actions,
+        init_qpos,
+        init_qvel,
+        ignore_termination,
+        source_timeout_at_end,
+    )
 
 
 def _copy_hdf5_metadata(src_path: str, dst_file: h5py.File, skip_prefixes: Iterable[str]) -> None:
@@ -188,23 +234,11 @@ def recreate_dataset(
     if max_episodes is not None:
         spans = spans[:max_episodes]
 
-    n_transitions = spans[-1].end + 1
-    actions = actions[:n_transitions]
-    terminals = terminals[:n_transitions]
-    timeouts = timeouts[:n_transitions]
-    source_qpos = source_qpos[:n_transitions]
-    source_qvel = source_qvel[:n_transitions]
-
     if output_path is None:
-        output_path = Path.home() / ".d4rl" / "datasets" / "hopper_medium_v4_reroll.hdf5"
+        stem = source_task.replace("-", "_").replace("v2", "v4_reroll")
+        output_path = Path.home() / ".d4rl" / "datasets" / f"{stem}.hdf5"
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    observations = np.zeros((n_transitions, 11), dtype=np.float32)
-    next_observations = np.zeros((n_transitions, 11), dtype=np.float32)
-    rewards = np.zeros(n_transitions, dtype=np.float32)
-    qpos_out = np.zeros((n_transitions, 6), dtype=np.float64)
-    qvel_out = np.zeros((n_transitions, 6), dtype=np.float64)
 
     worker_args = [
         (
@@ -214,6 +248,7 @@ def recreate_dataset(
             source_qpos[span.start],
             source_qvel[span.start],
             ignore_termination,
+            bool(timeouts[span.end]),
         )
         for span in spans
     ]
@@ -221,24 +256,60 @@ def recreate_dataset(
     num_workers = num_workers or max(1, (os.cpu_count() or 1) - 1)
     print(
         f"[reroll] source={source_path}\n"
-        f"[reroll] episodes={len(spans)} transitions={n_transitions}\n"
-        f"[reroll] sim=Hopper-v4 workers={num_workers} ignore_termination={ignore_termination}\n"
+        f"[reroll] source_episodes={len(spans)} source_transitions={spans[-1].end + 1}\n"
+        f"[reroll] sim=Hopper-v4 workers={num_workers} truncate_on_fall={not ignore_termination}\n"
         f"[reroll] output={output_path}"
     )
 
+    episode_chunks: list[tuple] = [None] * len(spans)
     completed = 0
     with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        futures = [pool.submit(_rollout_episode_packed, args) for args in worker_args]
-        for fut in as_completed(futures):
-            start, stop, obs, next_obs, rew, qpos_ep, qvel_ep = fut.result()
-            observations[start:stop] = obs
-            next_observations[start:stop] = next_obs
-            rewards[start:stop] = rew
-            qpos_out[start:stop] = qpos_ep
-            qvel_out[start:stop] = qvel_ep
+        future_map = {
+            pool.submit(_rollout_episode_packed, args): idx
+            for idx, args in enumerate(worker_args)
+        }
+        for fut in as_completed(future_map):
+            episode_chunks[future_map[fut]] = fut.result()
             completed += 1
             if completed % 100 == 0 or completed == len(spans):
                 print(f"[reroll] finished {completed}/{len(spans)} episodes")
+
+    obs_chunks = []
+    next_obs_chunks = []
+    rew_chunks = []
+    act_chunks = []
+    qpos_chunks = []
+    qvel_chunks = []
+    term_chunks = []
+    timeout_chunks = []
+    n_truncated = 0
+    for chunk in episode_chunks:
+        obs, next_obs, rew, qpos_ep, qvel_ep, act_ep, term_ep, to_ep, fell = chunk
+        obs_chunks.append(obs)
+        next_obs_chunks.append(next_obs)
+        rew_chunks.append(rew)
+        act_chunks.append(act_ep)
+        qpos_chunks.append(qpos_ep)
+        qvel_chunks.append(qvel_ep)
+        term_chunks.append(term_ep)
+        timeout_chunks.append(to_ep)
+        if fell:
+            n_truncated += 1
+
+    observations = np.concatenate(obs_chunks, axis=0)
+    next_observations = np.concatenate(next_obs_chunks, axis=0)
+    rewards = np.concatenate(rew_chunks, axis=0)
+    actions_out = np.concatenate(act_chunks, axis=0)
+    qpos_out = np.concatenate(qpos_chunks, axis=0)
+    qvel_out = np.concatenate(qvel_chunks, axis=0)
+    terminals_out = np.concatenate(term_chunks, axis=0)
+    timeouts_out = np.concatenate(timeout_chunks, axis=0)
+    n_transitions = observations.shape[0]
+
+    print(
+        f"[reroll] output transitions={n_transitions} "
+        f"episodes_truncated_by_fall={n_truncated}/{len(spans)}"
+    )
 
     if assemble_device != "cpu":
         assemble_device = _assemble_on_device(
@@ -268,15 +339,17 @@ def recreate_dataset(
         out.create_dataset("observations", data=observations, compression="gzip")
         out.create_dataset("next_observations", data=next_observations, compression="gzip")
         out.create_dataset("rewards", data=rewards, compression="gzip")
-        out.create_dataset("actions", data=actions, compression="gzip")
-        out.create_dataset("terminals", data=terminals, compression="gzip")
-        out.create_dataset("timeouts", data=timeouts, compression="gzip")
+        out.create_dataset("actions", data=actions_out, compression="gzip")
+        out.create_dataset("terminals", data=terminals_out, compression="gzip")
+        out.create_dataset("timeouts", data=timeouts_out, compression="gzip")
         out.create_dataset("infos/qpos", data=qpos_out, compression="gzip")
         out.create_dataset("infos/qvel", data=qvel_out, compression="gzip")
-        if "infos/action_log_probs" in ds:
+        if "infos/action_log_probs" in ds and not ignore_termination:
+            print("[reroll] skipping infos/action_log_probs (episode lengths changed after truncation)")
+        elif "infos/action_log_probs" in ds:
             out.create_dataset(
                 "infos/action_log_probs",
-                data=np.asarray(ds["infos/action_log_probs"]),
+                data=np.asarray(ds["infos/action_log_probs"][:n_transitions]),
                 compression="gzip",
             )
 
@@ -288,11 +361,42 @@ def recreate_dataset(
         out.attrs["reroll_source_task"] = source_task
         out.attrs["reroll_source_h5"] = str(source_path)
         out.attrs["reroll_sim_env"] = "Hopper-v4"
+        out.attrs["reroll_truncate_on_fall"] = bool(not ignore_termination)
         out.attrs["reroll_ignore_termination"] = bool(ignore_termination)
+        out.attrs["reroll_episodes_truncated_by_fall"] = int(n_truncated)
 
     elapsed = time.time() - t0
+    stats = analyze_dataset_quality(output_path)
     print(f"[reroll] saved {output_path} ({elapsed:.1f}s)")
+    print(f"[reroll] quality: {stats}")
     return output_path
+
+
+def analyze_dataset_quality(h5path: str | Path) -> dict:
+    with h5py.File(h5path, "r") as f:
+        qpos = f["infos/qpos"][:]
+        rewards = f["rewards"][:]
+        terminals = f["terminals"][:]
+        timeouts = f["timeouts"][:]
+
+    height = qpos[:, 1]
+    ang = qpos[:, 2]
+    fallen = (height <= 0.7) | (np.abs(ang) >= 0.2)
+
+    spans = _episode_spans(terminals, timeouts)
+    returns = [float(rewards[s : e + 1].sum()) for s, e in ((sp.start, sp.end) for sp in spans)]
+
+    return {
+        "transitions": int(rewards.shape[0]),
+        "episodes": len(spans),
+        "mean_step_reward": float(rewards.mean()),
+        "median_step_reward": float(np.median(rewards)),
+        "mean_episode_return": float(np.mean(returns)),
+        "median_episode_return": float(np.median(returns)),
+        "frac_transitions_fallen": float(fallen.mean()),
+        "frac_episodes_terminal_fall": float(terminals.sum() / max(len(spans), 1)),
+        "median_episode_len": float(np.median([e - s + 1 for s, e in ((sp.start, sp.end) for sp in spans)])),
+    }
 
 
 CHECK_HORIZONS = (1, 25, 50, 100)
@@ -468,9 +572,14 @@ def main():
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--max-episodes", type=int, default=None, help="Smoke-test subset.")
     parser.add_argument(
-        "--respect-termination",
+        "--ignore-termination",
         action="store_true",
-        help="Stop rolling when Hopper-v4 terminates (may shorten episodes).",
+        help="Keep rolling after fall to preserve source episode lengths (old behavior).",
+    )
+    parser.add_argument(
+        "--analyze-only",
+        action="store_true",
+        help="Print mean reward / fall stats for an existing HDF5 and exit.",
     )
     parser.add_argument(
         "--assemble-device",
@@ -492,8 +601,14 @@ def main():
     )
     args = parser.parse_args()
 
+    default_h5 = Path.home() / ".d4rl" / "datasets" / "hopper_medium_v4_reroll.hdf5"
+    h5path = args.output_path or default_h5
+
+    if args.analyze_only:
+        print(analyze_dataset_quality(h5path))
+        return
+
     if args.validate_only:
-        h5path = args.output_path or (Path.home() / ".d4rl" / "datasets" / "hopper_medium_v4_reroll.hdf5")
         validate_trajectory_replay(h5path, num_trajectories=args.num_trajectories)
         return
 
@@ -503,7 +618,7 @@ def main():
         output_path=args.output_path,
         num_workers=args.num_workers,
         max_episodes=args.max_episodes,
-        ignore_termination=not args.respect_termination,
+        ignore_termination=args.ignore_termination,
         assemble_device=args.assemble_device,
     )
 
