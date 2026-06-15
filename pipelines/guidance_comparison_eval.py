@@ -26,6 +26,47 @@ STANDARD_CONFIG = {
 }
 
 
+def _opt_scale_label(scale: float) -> str:
+    """Canonical config suffix: 0.5 -> 0p5, 2.0 -> 2, 10.0 -> 10."""
+    scale_f = float(scale)
+    if scale_f.is_integer():
+        return str(int(scale_f))
+    return str(scale_f).replace(".", "p")
+
+
+def _standard_w_cg_config(name: str) -> dict | None:
+    """Parse names like standard_w_cg0p3, standard_w_cg0p1, standard_w_cg1."""
+    prefix = "standard_w_cg"
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix):]
+    if suffix in ("", "0"):
+        w_cg = 0.0
+    else:
+        w_cg = float(suffix.replace("p", "."))
+    return {
+        "name": name,
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": w_cg,
+    }
+
+
+def _optimization_config(name: str) -> dict | None:
+    """Parse names like optimization_scale_0p5, optimization_scale_2."""
+    prefix = "optimization_scale_"
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix):]
+    scale = float(suffix.replace("p", "."))
+    return {
+        "name": name,
+        "guidance_mode": "optimization",
+        "optimization_guidance_scale": scale,
+        "w_cg": 0.0,
+    }
+
+
 def build_configs(
     opt_scales: list[float],
     include_monte_carlo: bool = False,
@@ -36,25 +77,37 @@ def build_configs(
         configs.append(MONTE_CARLO_CONFIG)
     configs.append(STANDARD_CONFIG)
     for scale in opt_scales:
-        label = str(scale).replace(".", "p")
+        label = _opt_scale_label(scale)
         configs.append(
             {
                 "name": f"optimization_scale_{label}",
                 "guidance_mode": "optimization",
-                "optimization_guidance_scale": scale,
+                "optimization_guidance_scale": float(scale),
                 "w_cg": 0.0,
             }
         )
 
     if config_names:
         allowed = set(config_names)
+        extra_configs = []
+        for name in config_names:
+            if name in {cfg["name"] for cfg in configs}:
+                continue
+            parsed = _standard_w_cg_config(name) or _optimization_config(name)
+            if parsed is not None:
+                extra_configs.append(parsed)
+        configs.extend(extra_configs)
         configs = [cfg for cfg in configs if cfg["name"] in allowed]
         missing = allowed - {cfg["name"] for cfg in configs}
         if missing:
             known = {
                 MONTE_CARLO_CONFIG["name"],
                 STANDARD_CONFIG["name"],
-                *[f"optimization_scale_{str(s).replace('.', 'p')}" for s in opt_scales],
+                *[f"optimization_scale_{_opt_scale_label(s)}" for s in opt_scales],
+                *[
+                    f"standard_w_cg{_opt_scale_label(w)}"
+                    for w in (0.0, 0.1, 0.3, 1.0)
+                ],
             }
             raise ValueError(f"Unknown config names: {sorted(missing)}. Known: {sorted(known)}")
 

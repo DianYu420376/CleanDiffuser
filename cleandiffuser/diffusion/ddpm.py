@@ -12,7 +12,12 @@ from cleandiffuser.utils import (
     cosine_beta_schedule,
     linear_beta_schedule)
 from .basic import DiffusionModel
-from .guidance import compute_guided_model_input, validate_guidance_config
+from .guidance import (
+    compute_optimization_shift,
+    compute_pi_t,
+    compute_reward_gradient,
+    validate_guidance_config,
+)
 
 
 class DDPM(DiffusionModel):
@@ -132,9 +137,17 @@ class DDPM(DiffusionModel):
         model = self.model_ema if use_ema else self.model
 
         validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
-        x_query, log_p = compute_guided_model_input(
-            x, t, self.classifier, condition_vec_cg, self.fix_mask, prior,
-            guidance_mode, optimization_guidance_scale)
+
+        if guidance_mode == "optimization":
+            log_p, grad = compute_reward_gradient(
+                x, t, self.classifier, condition_vec_cg, self.fix_mask
+            )
+            x_eval = compute_optimization_shift(
+                x, grad, optimization_guidance_scale, self.fix_mask, prior
+            )
+        else:
+            log_p = None
+            x_eval = x
 
         # ----------------- CFG ----------------- #
         with torch.set_grad_enabled(requires_grad):
@@ -142,14 +155,14 @@ class DDPM(DiffusionModel):
                 repeat_dim = [2 if i == 0 else 1 for i in range(x.dim())]
                 condition_vec_cfg = torch.cat([condition_vec_cfg, torch.zeros_like(condition_vec_cfg)], 0)
                 pred = model["diffusion"](
-                    x_query.repeat(*repeat_dim), t.repeat(2), condition_vec_cfg)
+                    x_eval.repeat(*repeat_dim), t.repeat(2), condition_vec_cfg)
                 pred = w_cfg * pred[:b] + (1. - w_cfg) * pred[b:]
             elif w_cfg == 0.0:
-                pred = model["diffusion"](x_query, t, None)
+                pred = model["diffusion"](x_eval, t, None)
             else:
-                pred = model["diffusion"](x_query, t, condition_vec_cfg)
+                pred = model["diffusion"](x_eval, t, condition_vec_cfg)
 
-        # ----------------- CG ----------------- #
+        # ----------------- CG (standard only) ----------------- #
         if (
             guidance_mode == "standard"
             and self.classifier is not None
@@ -161,14 +174,12 @@ class DDPM(DiffusionModel):
                 pred = pred - w_cg * (1 - bar_alpha).sqrt() * grad
             else:
                 pred = pred + w_cg * (1 - bar_alpha) / bar_alpha.sqrt() * grad
-        elif log_p is None:
-            log_p = None
 
         if self.predict_noise:
             if self.clip_pred:
-                upper_bound = (x - bar_alpha.sqrt() * self.x_min) / (1 - bar_alpha).sqrt() \
+                upper_bound = (x_eval - bar_alpha.sqrt() * self.x_min) / (1 - bar_alpha).sqrt() \
                     if self.x_min is not None else None
-                lower_bound = (x - bar_alpha.sqrt() * self.x_max) / (1 - bar_alpha).sqrt() \
+                lower_bound = (x_eval - bar_alpha.sqrt() * self.x_max) / (1 - bar_alpha).sqrt() \
                     if self.x_max is not None else None
                 pred = pred.clip(lower_bound, upper_bound)
             pred = pred * (1 - self.fix_mask)
@@ -177,7 +188,7 @@ class DDPM(DiffusionModel):
                 pred = pred.clip(self.x_min, self.x_max)
             pred = pred * (1 - self.fix_mask) + x * self.fix_mask
 
-        return pred, {"log_p": log_p}
+        return pred, {"log_p": log_p, "x_eval": x_eval}
 
     def sample(
             self,
@@ -234,7 +245,7 @@ class DDPM(DiffusionModel):
             beta = self.beta[t]
 
             # predict eps_theta or x_theta with CG/CFG
-            pred_theta, log = self.predict_function(
+            pred_theta, step_log = self.predict_function(
                 xt, t_batch, bar_alpha,
                 use_ema=use_ema,
                 requires_grad=requires_grad,
@@ -244,8 +255,10 @@ class DDPM(DiffusionModel):
                 prior=prior,
                 guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale)
+            log.update(step_log)
+            x_eval = step_log.get("x_eval", xt)
 
-            # one step denoise
+            # one step denoise (VP DDPM; optimization only changes denoiser eval point)
             if self.predict_noise:
 
                 xt = 1 / alpha.sqrt() * (xt - beta / (1 - bar_alpha).sqrt() * pred_theta)
@@ -328,7 +341,7 @@ class DDPM(DiffusionModel):
             beta = self.beta[t]
 
             # predict eps_theta or x_theta with CG/CFG
-            pred_theta, log = self.predict_function(
+            pred_theta, step_log = self.predict_function(
                 xt, t_batch, bar_alpha,
                 use_ema=use_ema,
                 requires_grad=requires_grad,
@@ -338,8 +351,10 @@ class DDPM(DiffusionModel):
                 prior=prior,
                 guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale)
+            log.update(step_log)
+            x_eval = step_log.get("x_eval", xt)
 
-            # one step denoise
+            # one step denoise (VP DDPM; optimization only changes denoiser eval point)
             if self.predict_noise:
 
                 xt = 1 / alpha.sqrt() * (xt - beta / (1 - bar_alpha).sqrt() * pred_theta)

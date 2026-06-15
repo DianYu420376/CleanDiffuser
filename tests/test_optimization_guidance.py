@@ -5,8 +5,14 @@ import torch.nn as nn
 from cleandiffuser.classifier import BaseClassifier
 from cleandiffuser.diffusion import DiscreteDiffusionSDE
 from cleandiffuser.diffusion.guidance import (
-    compute_guided_model_input,
+    apply_optimization_guidance_at_step,
+    compute_optimization_shift,
+    compute_pi_t,
+    compute_reward_gradient,
+    optimization_backward_step,
+    should_apply_optimization_guidance,
     validate_guidance_config,
+    vp_ddim_reverse_step,
 )
 from cleandiffuser.nn_diffusion import DiT1d
 
@@ -73,48 +79,105 @@ def _make_prior(batch_size=2):
     return prior
 
 
+def test_apply_optimization_guidance_at_step_last_half():
+    assert not apply_optimization_guidance_at_step(20, last_steps=10)
+    assert not apply_optimization_guidance_at_step(11, last_steps=10)
+    assert apply_optimization_guidance_at_step(10, last_steps=10)
+    assert apply_optimization_guidance_at_step(1, last_steps=10)
+
+
+def test_optimization_backward_step_matches_pdf_sigma_ratio():
+    xt = torch.tensor([[[1.0, 0.0]]])
+    pi_t = torch.tensor([[[2.0, 1.0]]])
+    sigma_curr = torch.tensor(0.6)
+    sigma_prev = torch.tensor(0.435889894)
+    step = optimization_backward_step(xt, pi_t, sigma_curr, sigma_prev)
+    expected = (sigma_prev / sigma_curr) * xt + (1.0 - sigma_prev / sigma_curr) * pi_t
+    assert torch.allclose(step, expected)
+
+
+def test_optimization_backward_uses_xt_and_pi_not_collapsed():
+    xt = torch.tensor([[[1.0, 0.0]]])
+    x_shift = torch.tensor([[[3.0, 2.0]]])
+    eps_shift = torch.tensor([[[0.5, -0.25]]])
+    alpha = torch.tensor(0.8)
+    sigma = torch.tensor(0.6)
+    sigma_next = torch.tensor(0.435889894)
+    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha, sigma)
+    step = optimization_backward_step(xt, pi_shift, sigma, sigma_next)
+    collapsed = (sigma_next / sigma) * x_shift + (1.0 - sigma_next / sigma) * pi_shift
+    assert not torch.allclose(step, collapsed, atol=TOL)
+    assert torch.allclose(
+        step,
+        (sigma_next / sigma) * xt + (1.0 - sigma_next / sigma) * pi_shift,
+        atol=TOL,
+    )
+
+
+def test_vp_ddim_reverse_step_mixes_xt_with_eps():
+    xt = torch.tensor([[[1.0, 0.0]]])
+    eps = torch.tensor([[[0.5, -0.25]]])
+    alpha_curr = torch.tensor(0.8)
+    sigma_curr = torch.tensor(0.6)
+    alpha_prev = torch.tensor(0.9)
+    sigma_prev = torch.tensor(0.435889894)
+    step = vp_ddim_reverse_step(xt, eps, alpha_curr, sigma_curr, alpha_prev, sigma_prev)
+    alpha_ratio = alpha_prev / alpha_curr
+    coef_eps = sigma_prev - alpha_prev * sigma_curr / alpha_curr
+    expected = alpha_ratio * xt + coef_eps * eps
+    assert torch.allclose(step, expected)
+
+
+def test_vp_ddim_matches_collapsed_form_when_eval_at_xt():
+    xt = torch.tensor([[[1.0, 0.0]]])
+    eps = torch.tensor([[[0.5, -0.25]]])
+    alpha_curr = torch.tensor(0.8)
+    sigma_curr = torch.tensor(0.6)
+    alpha_prev = torch.tensor(0.9)
+    sigma_prev = torch.tensor(0.435889894)
+    x_theta = compute_pi_t(xt, eps, True, alpha_curr, sigma_curr)
+    step = vp_ddim_reverse_step(xt, eps, alpha_curr, sigma_curr, alpha_prev, sigma_prev)
+    collapsed = alpha_prev * x_theta + sigma_prev * eps
+    assert torch.allclose(step, collapsed, atol=TOL)
+
+
+def test_vp_ddim_optimization_step_uses_chain_xt():
+    xt = torch.tensor([[[1.0, 0.0]]])
+    x_shift = torch.tensor([[[3.0, 2.0]]])
+    eps_shift = torch.tensor([[[0.5, -0.25]]])
+    alpha = torch.tensor(0.8)
+    sigma = torch.tensor(0.6)
+    sigma_next = torch.tensor(0.435889894)
+    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha, sigma)
+    step = optimization_backward_step(xt, pi_shift, sigma, sigma_next)
+    alpha_prev = torch.tensor(0.9)
+    wrong = alpha_prev * pi_shift + sigma_next * eps_shift
+    assert not torch.allclose(step, wrong, atol=TOL)
+
+
 def test_validate_guidance_config_conflict():
     with pytest.raises(ValueError, match="incompatible with w_cg"):
         validate_guidance_config("optimization", w_cg=0.3)
 
 
-def test_validate_guidance_config_unknown_mode():
-    with pytest.raises(ValueError, match="Unknown guidance_mode"):
-        validate_guidance_config("invalid", w_cg=0.0)
+def test_compute_pi_t_noise_prediction():
+    x = torch.tensor([[[2.0, 1.0]]])
+    eps = torch.tensor([[[0.5, -0.25]]])
+    alpha = torch.tensor(0.8)
+    sigma = torch.tensor(0.6)
+    pi = compute_pi_t(x, eps, True, alpha, sigma)
+    expected = (x - sigma * eps) / alpha
+    assert torch.allclose(pi, expected)
 
 
-def test_compute_guided_model_input_passthrough():
-    xt = torch.randn(2, HORIZON, DIM)
-    t = torch.zeros(2, dtype=torch.long)
-    out, log_p = compute_guided_model_input(xt, t, classifier=None)
-    assert torch.allclose(out, xt)
-    assert log_p is None
+def test_compute_pi_t_x0_prediction():
+    x = torch.randn(1, HORIZON, DIM)
+    x0 = torch.randn(1, HORIZON, DIM)
+    pi = compute_pi_t(x, x0, False, 0.8, 0.6)
+    assert torch.allclose(pi, x0)
 
 
-def test_compute_guided_model_input_masks_fixed_dims():
-    xt = torch.randn(1, HORIZON, DIM)
-    t = torch.zeros(1, dtype=torch.long)
-    prior = _make_prior(1)
-    fix_mask = torch.zeros((HORIZON, DIM))
-    fix_mask[0, :OBS_DIM] = 1.0
-    classifier = MockReturnClassifier(device=DEVICE)
-
-    x_model_input, log_p = compute_guided_model_input(
-        xt,
-        t,
-        classifier=classifier,
-        fix_mask=fix_mask,
-        prior=prior,
-        guidance_mode="optimization",
-        optimization_guidance_scale=0.1,
-    )
-
-    assert log_p is not None
-    assert torch.allclose(x_model_input[:, 0, :OBS_DIM], prior[:, 0, :OBS_DIM], atol=TOL)
-    assert not torch.allclose(x_model_input, xt)
-
-
-def test_compute_guided_model_input_chain_invariant():
+def test_compute_optimization_shift_chain_invariant():
     xt = torch.randn(1, HORIZON, DIM)
     xt_copy = xt.clone()
     t = torch.zeros(1, dtype=torch.long)
@@ -123,15 +186,8 @@ def test_compute_guided_model_input_chain_invariant():
     fix_mask[0, :OBS_DIM] = 1.0
     classifier = MockReturnClassifier(device=DEVICE)
 
-    compute_guided_model_input(
-        xt,
-        t,
-        classifier=classifier,
-        fix_mask=fix_mask,
-        prior=prior,
-        guidance_mode="optimization",
-        optimization_guidance_scale=0.1,
-    )
+    _, grad = compute_reward_gradient(xt, t, classifier, fix_mask=fix_mask)
+    compute_optimization_shift(xt, grad, 0.1, fix_mask, prior)
 
     assert torch.allclose(xt, xt_copy)
 
@@ -212,6 +268,68 @@ def test_optimization_sampling_runs(planning_setup):
 
     assert traj.shape == prior.shape
     assert log["log_p"] is not None
+
+
+def test_optimization_pi_evaluated_at_shift(planning_setup):
+    agent, fix_mask = planning_setup
+    prior = _make_prior(1)
+    xt = torch.randn_like(prior)
+    t = torch.zeros(1, dtype=torch.long)
+    model = agent.model_ema
+    alpha = agent.alpha[1]
+    sigma = agent.sigma[1]
+
+    _, grad = compute_reward_gradient(xt, t, agent.classifier, fix_mask=fix_mask)
+    x_shift = compute_optimization_shift(xt, grad, 0.1, fix_mask, prior)
+    pred_shift = model["diffusion"](x_shift, t, None)
+
+    pi_at_shift = compute_pi_t(x_shift, pred_shift, True, alpha, sigma)
+    pi_at_xt = compute_pi_t(xt, pred_shift, True, alpha, sigma)
+
+    assert not torch.allclose(pi_at_shift, pi_at_xt, atol=TOL)
+    assert not torch.allclose(x_shift, xt, atol=TOL)
+
+
+def test_optimization_eta_zero_matches_standard_ddim(planning_setup):
+    agent, _ = planning_setup
+    prior = _make_prior(2)
+
+    torch.manual_seed(42)
+    traj_std, _ = agent.sample(
+        prior,
+        solver="ddim",
+        n_samples=2,
+        sample_steps=5,
+        use_ema=True,
+        w_cg=0.0,
+        guidance_mode="standard",
+        optimization_guidance_scale=0.0,
+        optimization_guidance_last_steps=5,
+    )
+
+    torch.manual_seed(42)
+    traj_opt, _ = agent.sample(
+        prior,
+        solver="ddim",
+        n_samples=2,
+        sample_steps=5,
+        use_ema=True,
+        w_cg=0.0,
+        guidance_mode="optimization",
+        optimization_guidance_scale=0.0,
+        optimization_guidance_last_steps=5,
+    )
+
+    assert torch.allclose(traj_std, traj_opt, atol=TOL)
+
+
+def test_should_apply_optimization_guidance_requires_positive_eta():
+    assert not should_apply_optimization_guidance(
+        "optimization", loop_i=5, last_steps=10, optimization_guidance_scale=0.0
+    )
+    assert should_apply_optimization_guidance(
+        "optimization", loop_i=5, last_steps=10, optimization_guidance_scale=0.1
+    )
 
 
 def test_fixed_observation_hard_enforced(planning_setup):

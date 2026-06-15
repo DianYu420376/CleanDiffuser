@@ -8,6 +8,7 @@ outputs/
 *.gif
 *.mp4
 *.out
+*.err
 *.csv
 datasets/
 dev/

@@ -10,7 +10,16 @@ from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.nn_diffusion import BaseNNDiffusion
 from cleandiffuser.utils import at_least_ndim
 from .basic import DiffusionModel
-from .guidance import compute_guided_model_input, validate_guidance_config
+from .guidance import (
+    apply_optimization_guidance_at_step,
+    compute_optimization_shift,
+    compute_pi_t,
+    compute_reward_gradient,
+    optimization_backward_step,
+    should_apply_optimization_guidance,
+    validate_guidance_config,
+    vp_ddim_reverse_step,
+)
 
 
 class DDIM(DiffusionModel):
@@ -126,6 +135,7 @@ class DDIM(DiffusionModel):
             w_cg: float = 0.0,
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
+            optimization_guidance_last_steps: int = 10,
 
             preserve_history: bool = False,
     ):
@@ -159,22 +169,37 @@ class DDIM(DiffusionModel):
 
             t_batch = t[i].repeat(n_samples)
 
-            x_query, log_p = compute_guided_model_input(
-                xt, t_batch, self.classifier, condition_vec_cg, self.fix_mask, prior,
-                guidance_mode, optimization_guidance_scale)
+            loop_i = sample_steps - i
+            use_opt_guidance = should_apply_optimization_guidance(
+                guidance_mode,
+                loop_i,
+                optimization_guidance_last_steps,
+                optimization_guidance_scale,
+            )
+
+            if use_opt_guidance:
+                log_p, grad = compute_reward_gradient(
+                    xt, t_batch, self.classifier, condition_vec_cg, self.fix_mask
+                )
+                x_eval = compute_optimization_shift(
+                    xt, grad, optimization_guidance_scale, self.fix_mask, prior
+                )
+            else:
+                log_p = None
+                x_eval = xt
 
             # ----------------- CFG ----------------- #
             with torch.no_grad():
                 if w_cfg != 0.0 and w_cfg != 1.0:
                     condition_vec_cfg = torch.cat([condition_vec_cfg, torch.zeros_like(condition_vec_cfg)], 0)
                     eps_theta = model["diffusion"](
-                        torch.repeat_interleave(x_query, 2, dim=0),
+                        torch.repeat_interleave(x_eval, 2, dim=0),
                         torch.repeat_interleave(t_batch, 2, dim=0),
                         condition_vec_cfg)
                     eps_theta = w_cfg * eps_theta[:n_samples] + (1. - w_cfg) * eps_theta[n_samples:]
                 else:
-                    eps_theta = model["diffusion"](x_query, t_batch, condition_vec_cfg)
-            # ----------------- CG ----------------- #
+                    eps_theta = model["diffusion"](x_eval, t_batch, condition_vec_cfg)
+            # ----------------- CG (standard only) ----------------- #
             if (
                 guidance_mode == "standard"
                 and self.classifier is not None
@@ -182,11 +207,16 @@ class DDIM(DiffusionModel):
             ):
                 _, grad = self.classifier.gradients(xt.clone(), t_batch, condition_vec_cg)
                 eps_theta = eps_theta - w_cg * sigmas[i] * grad
-            elif log_p is None:
-                log_p = None
 
-            # do not change the fixed portion
-            xt = alphas[i + 1] / alphas[i] * xt - sigmas[i + 1] * torch.expm1(h) * eps_theta
+            x_theta = compute_pi_t(x_eval, eps_theta, True, alphas[i], sigmas[i])
+            if use_opt_guidance:
+                xt = optimization_backward_step(
+                    xt, x_theta, sigmas[i], sigmas[i + 1]
+                )
+            else:
+                xt = vp_ddim_reverse_step(
+                    xt, eps_theta, alphas[i], sigmas[i], alphas[i + 1], sigmas[i + 1]
+                )
             xt = xt * (1. - self.fix_mask) + prior * self.fix_mask
 
             if preserve_history:

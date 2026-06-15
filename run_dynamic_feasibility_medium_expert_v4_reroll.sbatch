@@ -28,12 +28,12 @@ export D4RL_SUPPRESS_IMPORT_ERROR=1
 export MUJOCO_GL=disable
 
 MIN_TRAJECTORIES="${MIN_TRAJECTORIES:-100}"
-SEED_START="${SEED_START:-0}"
-SEED_END="${SEED_END:-50}"
+SEED="${SEED:-0}"
 NUM_CANDIDATES="${NUM_CANDIDATES:-64}"
-CONFIGS="${CONFIGS:-standard_w_cg0p3,optimization_scale_0p1,optimization_scale_0p25}"
+INIT_MODE="${INIT_MODE:-dataset_episode_starts}"
+CONFIGS="${CONFIGS:-monte_carlo_w_cg0,standard_w_cg0p3,optimization_scale_0p1,optimization_scale_0p25}"
 
-echo "Dynamic feasibility: task=${TASK} ckpt=${CKPT} min_trajectories=${MIN_TRAJECTORIES}"
+echo "Dynamic feasibility: task=${TASK} ckpt=${CKPT} min_trajectories=${MIN_TRAJECTORIES} init_mode=${INIT_MODE}"
 
 "${VENV_DIR}/bin/python" -u pipelines/dynamic_feasibility_comparison.py \
   --repo-dir "${REPO_DIR}" \
@@ -41,9 +41,9 @@ echo "Dynamic feasibility: task=${TASK} ckpt=${CKPT} min_trajectories=${MIN_TRAJ
   --ckpt "${CKPT}" \
   --run-suffix "${RUN_SUFFIX}" \
   --dataset-h5path "${DATASET_H5PATH}" \
-  --seed-start "${SEED_START}" \
-  --seed-end "${SEED_END}" \
+  --seed "${SEED}" \
   --min-trajectories "${MIN_TRAJECTORIES}" \
   --num-candidates "${NUM_CANDIDATES}" \
+  --init-mode "${INIT_MODE}" \
   --configs "${CONFIGS}" \
   --output-dir "${OUTPUT_DIR}"

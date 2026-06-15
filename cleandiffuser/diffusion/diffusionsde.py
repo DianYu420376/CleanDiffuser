@@ -11,7 +11,16 @@ from cleandiffuser.utils import (
     at_least_ndim,
     SUPPORTED_NOISE_SCHEDULES, SUPPORTED_DISCRETIZATIONS, SUPPORTED_SAMPLING_STEP_SCHEDULE)
 from .basic import DiffusionModel
-from .guidance import compute_guided_model_input, validate_guidance_config
+from .guidance import (
+    apply_optimization_guidance_at_step,
+    should_apply_optimization_guidance,
+    compute_optimization_shift,
+    compute_pi_t,
+    compute_reward_gradient,
+    optimization_backward_step,
+    validate_guidance_config,
+    vp_ddim_reverse_step,
+)
 
 SUPPORTED_SOLVERS = [
     "ddpm", "ddim",
@@ -231,19 +240,33 @@ class BaseDiffusionSDE(DiffusionModel):
             requires_grad: bool = False,
             prior=None,
             guidance_mode: str = "standard",
-            optimization_guidance_scale: float = 0.0):
+            optimization_guidance_scale: float = 0.0,
+            apply_optimization_guidance: bool = True):
         """
         One-step epsilon/x0 prediction with guidance.
+
+        Standard mode applies CFG on x_t, then classifier guidance on the score.
+        Optimization mode evaluates the denoiser at x_t + η∇R(x_t) only; the
+        shifted posterior mean π_t is combined with x_t in the backward update.
+        When ``apply_optimization_guidance`` is False, optimization mode falls
+        back to unguided standard sampling for that step.
         """
         validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
 
-        if guidance_mode == "optimization":
-            x_query, logp = compute_guided_model_input(
-                xt, t, self.classifier, condition_cg, self.fix_mask, prior,
-                guidance_mode, optimization_guidance_scale)
+        if (
+            guidance_mode == "optimization"
+            and apply_optimization_guidance
+            and optimization_guidance_scale != 0.0
+        ):
+            logp, grad = compute_reward_gradient(
+                xt, t, self.classifier, condition_cg, self.fix_mask
+            )
+            x_shift = compute_optimization_shift(
+                xt, grad, optimization_guidance_scale, self.fix_mask, prior
+            )
             pred = self.classifier_free_guidance(
-                x_query, t, model, condition_cfg, w_cfg, None, None, requires_grad)
-            return pred, logp
+                x_shift, t, model, condition_cfg, w_cfg, None, None, requires_grad)
+            return pred, logp, x_shift
 
         pred = self.classifier_free_guidance(
             xt, t, model, condition_cfg, w_cfg, None, None, requires_grad)
@@ -251,7 +274,7 @@ class BaseDiffusionSDE(DiffusionModel):
         pred, logp = self.classifier_guidance(
             xt, t, alpha, sigma, model, condition_cg, w_cg, pred)
 
-        return pred, logp
+        return pred, logp, xt
 
     def sample(self, *args, **kwargs):
         raise NotImplementedError
@@ -346,6 +369,7 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             epsilon: float = 1e-3,
 
             diffusion_steps: int = 1000,
+            training_diffusion_steps: Optional[int] = None,
             discretization: Union[str, Callable] = "uniform",
 
             noise_schedule: Union[str, Dict[str, Callable]] = "cosine",
@@ -363,6 +387,9 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             epsilon, noise_schedule, noise_schedule_params, x_max, x_min, predict_noise, device)
 
         self.diffusion_steps = diffusion_steps
+        self.training_diffusion_steps = (
+            diffusion_steps if training_diffusion_steps is None else training_diffusion_steps
+        )
 
         if 1. / diffusion_steps < epsilon:
             raise ValueError("epsilon is too large for the number of diffusion steps")
@@ -430,6 +457,7 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             w_cg: float = 0.0,
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
+            optimization_guidance_last_steps: int = 10,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -526,6 +554,13 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
         else:
             raise ValueError("sample_step_schedule must be a callable or a string")
 
+        def _model_timestep(schedule_value: Union[int, float]) -> float:
+            if self.training_diffusion_steps == self.diffusion_steps:
+                return float(schedule_value)
+            return float(schedule_value) * (self.training_diffusion_steps - 1) / max(
+                self.diffusion_steps - 1, 1
+            )
+
         alphas = self.alpha[sample_step_schedule]
         sigmas = self.sigma[sample_step_schedule]
         logSNRs = torch.log(alphas / sigmas)
@@ -540,23 +575,36 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
         loop_steps = [1] * diffusion_x_sampling_steps + list(range(1, sample_steps + 1))
         for i in reversed(loop_steps):
 
-            t = torch.full((n_samples,), sample_step_schedule[i], dtype=torch.long, device=self.device)
+            t = torch.full(
+                (n_samples,),
+                _model_timestep(sample_step_schedule[i]),
+                dtype=torch.float32,
+                device=self.device,
+            )
+
+            use_opt_guidance = should_apply_optimization_guidance(
+                guidance_mode,
+                i,
+                optimization_guidance_last_steps,
+                optimization_guidance_scale,
+            )
 
             # guided sampling
-            pred, logp = self.guided_sampling(
+            pred, logp, x_eval = self.guided_sampling(
                 xt, t, alphas[i], sigmas[i],
                 model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
                 prior=prior, guidance_mode=guidance_mode,
-                optimization_guidance_scale=optimization_guidance_scale)
+                optimization_guidance_scale=optimization_guidance_scale,
+                apply_optimization_guidance=use_opt_guidance)
 
             # clip the prediction
-            pred = self.clip_prediction(pred, xt, alphas[i], sigmas[i])
+            pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])
 
-            # noise & data prediction
-            eps_theta = pred if self.predict_noise else xtheta_to_epstheta(xt, alphas[i], sigmas[i], pred)
-            x_theta = pred if not self.predict_noise else epstheta_to_xtheta(xt, alphas[i], sigmas[i], pred)
+            # π_t(x) = E[x_0|x]: evaluate at x_eval (x_t, or x_t+η∇R in optimization mode)
+            eps_theta = pred if self.predict_noise else xtheta_to_epstheta(x_eval, alphas[i], sigmas[i], pred)
+            x_theta = compute_pi_t(x_eval, pred, self.predict_noise, alphas[i], sigmas[i])
 
-            # one-step update
+            # one-step update (native VP solvers; optimization only changes where π_t is evaluated)
             if solver == "ddpm":
                 xt = (
                         (alphas[i - 1] / alphas[i]) * (xt - sigmas[i] * eps_theta) +
@@ -565,7 +613,14 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
                     xt += (stds[i] * torch.randn_like(xt))
 
             elif solver == "ddim":
-                xt = (alphas[i - 1] * ((xt - sigmas[i] * eps_theta) / alphas[i]) + sigmas[i - 1] * eps_theta)
+                if use_opt_guidance:
+                    xt = optimization_backward_step(
+                        xt, x_theta, sigmas[i], sigmas[i - 1]
+                    )
+                else:
+                    xt = vp_ddim_reverse_step(
+                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1]
+                    )
 
             elif solver == "ode_dpmsolver_1":
                 xt = (alphas[i - 1] / alphas[i]) * xt - sigmas[i - 1] * torch.expm1(hs[i]) * eps_theta
@@ -776,6 +831,7 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             w_cg: float = 0.0,
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
+            optimization_guidance_last_steps: int = 10,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -892,21 +948,29 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
 
             t = torch.full((n_samples,), sample_step_schedule[i], dtype=torch.float32, device=self.device)
 
+            use_opt_guidance = should_apply_optimization_guidance(
+                guidance_mode,
+                i,
+                optimization_guidance_last_steps,
+                optimization_guidance_scale,
+            )
+
             # guided sampling
-            pred, logp = self.guided_sampling(
+            pred, logp, x_eval = self.guided_sampling(
                 xt, t, alphas[i], sigmas[i],
                 model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
                 prior=prior, guidance_mode=guidance_mode,
-                optimization_guidance_scale=optimization_guidance_scale)
+                optimization_guidance_scale=optimization_guidance_scale,
+                apply_optimization_guidance=use_opt_guidance)
 
             # clip the prediction
-            pred = self.clip_prediction(pred, xt, alphas[i], sigmas[i])
+            pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])
 
-            # transform to eps_theta
-            eps_theta = pred if self.predict_noise else xtheta_to_epstheta(xt, alphas[i], sigmas[i], pred)
-            x_theta = pred if not self.predict_noise else epstheta_to_xtheta(xt, alphas[i], sigmas[i], pred)
+            # π_t(x) = E[x_0|x]: evaluate at x_eval (x_t, or x_t+η∇R in optimization mode)
+            eps_theta = pred if self.predict_noise else xtheta_to_epstheta(x_eval, alphas[i], sigmas[i], pred)
+            x_theta = compute_pi_t(x_eval, pred, self.predict_noise, alphas[i], sigmas[i])
 
-            # one-step update
+            # one-step update (native VP solvers; optimization only changes where π_t is evaluated)
             if solver == "ddpm":
                 xt = (
                         (alphas[i - 1] / alphas[i]) * (xt - sigmas[i] * eps_theta) +
@@ -915,7 +979,14 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
                     xt += (stds[i] * torch.randn_like(xt))
 
             elif solver == "ddim":
-                xt = (alphas[i - 1] * ((xt - sigmas[i] * eps_theta) / alphas[i]) + sigmas[i - 1] * eps_theta)
+                if use_opt_guidance:
+                    xt = optimization_backward_step(
+                        xt, x_theta, sigmas[i], sigmas[i - 1]
+                    )
+                else:
+                    xt = vp_ddim_reverse_step(
+                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1]
+                    )
 
             elif solver == "ode_dpmsolver_1":
                 xt = (alphas[i - 1] / alphas[i]) * xt - sigmas[i - 1] * torch.expm1(hs[i]) * eps_theta
