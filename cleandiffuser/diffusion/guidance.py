@@ -111,33 +111,58 @@ def vp_ddim_reverse_step(
     sigma_curr: Union[torch.Tensor, float],
     alpha_prev: Union[torch.Tensor, float],
     sigma_prev: Union[torch.Tensor, float],
+    std: Optional[Union[torch.Tensor, float]] = None,
+    eta: float = 0.0,
+    add_noise: bool = True,
 ) -> torch.Tensor:
-    """Standard deterministic VP-DDIM step (x_eval = x_t).
+    """Standard VP-DDIM reverse step with optional DDPM-style noise.
 
-    x_{t-1} = (α_{t-1}/α_t) x_t + (σ_{t-1} - α_{t-1}σ_t/α_t) ε_θ(x_t)
-            = α_{t-1} π_t(x_t) + σ_{t-1} ε_θ(x_t)
+    Deterministic core (``eta=0``):
+        x_{t-1} = (α_{t-1}/α_t) x_t + (σ_{t-1} - α_{t-1}σ_t/α_t) ε_θ(x_t)
+
+    When ``eta > 0`` and ``std`` is provided, adds ``eta * std * z`` with ``z ~ N(0, I)``.
+    ``std`` is the DDPM posterior std from ``DiscreteDiffusionSDE`` (``stds[i]``).
     """
     alpha_ratio = at_least_ndim(alpha_prev / alpha_curr, xt.dim())
-    coef_eps = at_least_ndim(sigma_prev, xt.dim()) - at_least_ndim(
-        alpha_prev * sigma_curr / alpha_curr, xt.dim()
-    )
-    return alpha_ratio * xt + coef_eps * eps_theta
+    mean = alpha_ratio * (xt - at_least_ndim(sigma_curr, xt.dim()) * eps_theta) + (at_least_ndim(sigma_prev, xt.dim()) ** 2 - eta**2*at_least_ndim(std, xt.dim()) ** 2 + 1e-8).sqrt() * eps_theta
+    if std is not None and eta != 0.0 and add_noise:
+        mean = mean + eta * at_least_ndim(std, xt.dim()) * torch.randn_like(xt)
+    return mean
+    # xt = (
+    #                     (alphas[i - 1] / alphas[i]) * (xt - sigmas[i] * eps_theta) +
+    #                     (sigmas[i - 1] ** 2 - stds[i] ** 2 + 1e-8).sqrt() * eps_theta)
+    #             if i > 1:
+                    # xt += (stds[i] * torch.randn_like(xt))
 
 
 def optimization_backward_step(
     xt: torch.Tensor,
     pi_t: torch.Tensor,
+    alpha_curr: Union[torch.Tensor, float],
     sigma_curr: Union[torch.Tensor, float],
+    alpha_prev: Union[torch.Tensor, float],
     sigma_prev: Union[torch.Tensor, float],
+    std: Optional[Union[torch.Tensor, float]] = None,
+    eta: float = 0.0,
+    add_noise: bool = True,
 ) -> torch.Tensor:
-    """PDF Eq. (3) with VP π_t: mix chain x_t with π_t(x_t + η∇R).
+    """Optimization backward step mixing chain ``x_t`` with ``π_t(x_eval)``.
 
-    x_{t-1} = (σ_{t-1}/σ_t) x_t + (1 - σ_{t-1}/σ_t) π_t(x_eval)
+    Deterministic core:
+        x_{t-1} = (σ_{t-1}/σ_t) x_t + (α_{t-1} - σ_{t-1}α_t/σ_t) π_t(x_eval)
 
-    π_t is E[x_0|x] under the VP forward process; x_eval is the shifted point.
+    ``std`` and ``eta`` are pass-through hooks for optional stochastic extensions
+    (same convention as ``vp_ddim_reverse_step``).
     """
-    sigma_ratio = at_least_ndim(sigma_prev / sigma_curr, xt.dim())
-    return sigma_ratio * xt + (1.0 - sigma_ratio) * pi_t
+    sigma_prev_prime = (at_least_ndim(sigma_prev, xt.dim()) ** 2 - eta**2*at_least_ndim(std, xt.dim()) ** 2 + 1e-8).sqrt()
+    sigma_ratio = at_least_ndim(sigma_prev_prime / sigma_curr, xt.dim())
+    coef_pi = at_least_ndim(alpha_prev, xt.dim()) - at_least_ndim(
+        alpha_curr * sigma_ratio, xt.dim()
+    )
+    mean = sigma_ratio * xt + coef_pi * pi_t
+    if std is not None and eta != 0.0 and add_noise:
+        mean = mean + eta * at_least_ndim(std, xt.dim()) * torch.randn_like(xt)
+    return mean
 
 
 # Backward-compatible alias used by older call sites during migration.

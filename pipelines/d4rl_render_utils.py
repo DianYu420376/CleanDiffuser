@@ -16,16 +16,26 @@ except Exception:  # pragma: no cover - d4rl may be partially unavailable
 
 GymEnv = Union[gym.Env, object]
 
-D4RL_MUJOCO_TO_GYMNASIUM = {
-    "halfcheetah": "HalfCheetah-v4",
-    "walker2d": "Walker2d-v4",
-    "hopper": "Hopper-v4",
-    "ant": "Ant-v4",
+# Standalone OpenAI Gym v2 MuJoCo envs (mujoco_py) used only when the D4RL task
+# env cannot be instantiated for rollout on this machine.
+D4RL_MUJOCO_V2_GYM_FALLBACK = {
+    "halfcheetah": "HalfCheetah-v2",
+    "walker2d": "Walker2d-v2",
+    "hopper": "Hopper-v2",
+    "ant": "Ant-v2",
+}
+
+# D4RL v2 offline tasks whose rollouts should use matching mujoco_py dynamics
+# (the task env itself, e.g. halfcheetah-medium-v2), not Gymnasium v4.
+D4RL_MUJOCO_NATIVE_GYM_TASKS = {
+    "hopper",
+    "halfcheetah",
+    "walker2d",
 }
 
 
 def parse_mujoco_agent(env_name: str) -> str:
-    for agent in D4RL_MUJOCO_TO_GYMNASIUM:
+    for agent in D4RL_MUJOCO_V2_GYM_FALLBACK:
         if env_name.startswith(agent):
             return agent
     raise ValueError(f"Cannot infer MuJoCo agent from task name: {env_name}")
@@ -63,7 +73,8 @@ def make_sim_eval_env(
 ) -> Tuple[GymEnv, str]:
     """Create a physics env for rollout/render.
 
-    Offline D4RL tasks (dataset-only on aarch64) fall back to Gymnasium MuJoCo envs.
+    Prefer D4RL v2 task envs (mujoco_py) that match the offline dataset dynamics.
+    If those are unavailable, fall back to standalone Gym v2 envs (HalfCheetah-v2, etc.).
     """
     if sim_env_name:
         return _make_env(
@@ -79,17 +90,31 @@ def make_sim_eval_env(
 
     probe.close()
     agent = parse_mujoco_agent(d4rl_task_name)
-    sim_name = D4RL_MUJOCO_TO_GYMNASIUM[agent]
+    if agent in D4RL_MUJOCO_NATIVE_GYM_TASKS:
+        print(
+            f"[render] Task `{d4rl_task_name}` is offline-only; "
+            f"using native D4RL v2 mujoco_py `{d4rl_task_name}` for rollout."
+        )
+        return _make_env(
+            d4rl_task_name,
+            render,
+            render_width,
+            render_height,
+            backend="gym",
+            ignore_termination=ignore_termination,
+        ), d4rl_task_name
+
+    sim_name = D4RL_MUJOCO_V2_GYM_FALLBACK[agent]
     print(
         f"[render] Task `{d4rl_task_name}` is offline-only; "
-        f"using sim env `{sim_name}` for rollout."
+        f"using Gym v2 sim env `{sim_name}` for rollout."
     )
     return _make_env(
         sim_name,
         render,
         render_width,
         render_height,
-        backend="gymnasium",
+        backend="gym",
         ignore_termination=ignore_termination,
     ), sim_name
 
@@ -160,8 +185,21 @@ def _make_env(
     return env
 
 
-def env_reset(env: GymEnv) -> np.ndarray:
-    out = env.reset()
+def env_reset(env: GymEnv, seed: Optional[int] = None) -> np.ndarray:
+    """Reset env and return initial observation.
+
+    When ``seed`` is set, uses ``env.reset(seed=seed)`` when supported, otherwise
+    ``env.seed(seed)`` followed by ``env.reset()`` for legacy Gym/mujoco_py envs.
+    """
+    if seed is not None:
+        try:
+            out = env.reset(seed=seed)
+        except TypeError:
+            if hasattr(env, "seed"):
+                env.seed(seed)
+            out = env.reset()
+    else:
+        out = env.reset()
     if isinstance(out, tuple):
         return np.asarray(out[0], dtype=np.float32)
     return np.asarray(out, dtype=np.float32)

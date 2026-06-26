@@ -1,0 +1,615 @@
+"""Dynamic feasibility on hopper-v2: compare guidance methods with 64 candidates.
+
+For each of ``num_seeds`` trials:
+  1. Randomly sample one initial condition (dataset episode start).
+  2. For each guidance config, reset RNG to the same comparison seed and sample
+     ``num_candidates`` diffusion plans (trajA) with identical initial state.
+  3. Open-loop rollout each candidate's actions in native hopper-v2 (trajB).
+  4. Report per-candidate normalized L2 gaps and rewards; aggregate mean/std over 64.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import d4rl  # noqa: F401
+import gym
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+
+from cleandiffuser.classifier import CumRewClassifier
+from cleandiffuser.dataset.d4rl_mujoco_dataset import D4RLMuJoCoDataset
+from cleandiffuser.diffusion import DiscreteDiffusionSDE
+from cleandiffuser.diffusion.guidance import validate_guidance_config
+from cleandiffuser.nn_classifier import HalfJannerUNet1d
+from cleandiffuser.nn_diffusion import JannerUNet1d
+
+from d4rl_render_utils import env_reset, env_step, make_sim_eval_env, resolve_ckpt_stem
+from dynamic_feasibility_comparison import (
+    _current_obs,
+    _episode_starts,
+    _feasibility_gaps,
+    _get_mujoco_state,
+    _load_task_settings,
+    _log,
+    _mean_std,
+    _obs_std_vector,
+    _set_mujoco_state,
+)
+from guidance_comparison_eval import (
+    MONTE_CARLO_CONFIG,
+    STANDARD_CONFIG,
+    build_configs,
+)
+from utils import set_seed
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+
+DEFAULT_CONFIGS = [
+    MONTE_CARLO_CONFIG["name"],
+    STANDARD_CONFIG["name"],
+    "optimization_scale_0p1",
+    "optimization_scale_0p3",
+    "optimization_scale_0p05",
+]
+
+EP150_FEASIBILITY_CONFIGS = [
+    {
+        "name": "monte_carlo_w_cg0",
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": 0.0,
+        "solver": "ddpm",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+    },
+    {
+        "name": "standard_wcg0p3",
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": 0.3,
+        "solver": "ddpm",
+        "temperature": 0.5,
+        "sampling_steps": 20,
+    },
+    {
+        "name": "standard_wcg0p5_temp1",
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": 0.5,
+        "solver": "ddpm",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+    },
+    {
+        "name": "opt_scale01_optlast10",
+        "guidance_mode": "optimization",
+        "optimization_guidance_scale": 0.1,
+        "w_cg": 0.0,
+        "solver": "ddim",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+        "optimization_guidance_last_steps": 10,
+        "ddim_eta": 1.0,
+    },
+    {
+        "name": "opt_scale01_optlast5",
+        "guidance_mode": "optimization",
+        "optimization_guidance_scale": 0.1,
+        "w_cg": 0.0,
+        "solver": "ddim",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+        "optimization_guidance_last_steps": 5,
+        "ddim_eta": 1.0,
+    },
+
+]
+
+EP150_PLUS_OPT0_FEASIBILITY_CONFIGS = EP150_FEASIBILITY_CONFIGS + [
+    {
+        "name": "opt_scale0_optlast10",
+        "guidance_mode": "optimization",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": 0.0,
+        "solver": "ddim",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+        "optimization_guidance_last_steps": 10,
+        "ddim_eta": 1.0,
+    },
+]
+
+
+def _resolve_sampling_params(config: dict, args) -> dict:
+    return {
+        "solver": config.get("solver", args.solver),
+        "sample_steps": int(config.get("sampling_steps", args.sampling_steps)),
+        "temperature": float(config.get("temperature", args.temperature)),
+        "optimization_guidance_last_steps": int(
+            config.get("optimization_guidance_last_steps", args.optimization_guidance_last_steps)
+        ),
+        "ddim_eta": float(config.get("ddim_eta", 0.0)),
+    }
+
+
+def _load_agent(args, save_path: str, obs_dim: int, act_dim: int, horizon: int) -> DiscreteDiffusionSDE:
+    nn_diffusion = JannerUNet1d(
+        obs_dim + act_dim,
+        model_dim=args.model_dim,
+        emb_dim=args.model_dim,
+        dim_mult=args.dim_mult,
+        timestep_emb_type="positional",
+        attention=False,
+        kernel_size=5,
+    )
+    nn_classifier = HalfJannerUNet1d(
+        horizon,
+        obs_dim + act_dim,
+        out_dim=1,
+        model_dim=args.model_dim,
+        emb_dim=args.model_dim,
+        dim_mult=args.dim_mult,
+        timestep_emb_type="positional",
+        kernel_size=3,
+    )
+    classifier = CumRewClassifier(nn_classifier, device=args.device)
+
+    fix_mask = torch.zeros((horizon, obs_dim + act_dim))
+    fix_mask[0, :obs_dim] = 1.0
+    loss_weight = torch.ones((horizon, obs_dim + act_dim))
+    loss_weight[0, obs_dim:] = args.action_loss_weight
+
+    agent = DiscreteDiffusionSDE(
+        nn_diffusion,
+        None,
+        fix_mask=fix_mask,
+        loss_weight=loss_weight,
+        classifier=classifier,
+        ema_rate=args.ema_rate,
+        device=args.device,
+        diffusion_steps=args.diffusion_steps,
+        training_diffusion_steps=args.training_diffusion_steps,
+        predict_noise=args.predict_noise,
+        noise_schedule="cosine",
+    )
+
+    ckpt_stem = resolve_ckpt_stem(str(args.ckpt))
+    agent.load(save_path + f"diffusion_ckpt_{ckpt_stem}.pt")
+    agent.classifier.load(save_path + f"classifier_ckpt_{ckpt_stem}.pt")
+    agent.eval()
+    return agent
+
+
+def _sample_one_init(
+    env,
+    raw_dataset: dict,
+    rng: np.random.Generator,
+) -> dict:
+    qpos = raw_dataset["infos/qpos"]
+    qvel = raw_dataset["infos/qvel"]
+    starts = _episode_starts(raw_dataset["terminals"], raw_dataset["timeouts"])
+    start = int(rng.choice(starts))
+    env_reset(env)
+    _set_mujoco_state(env, qpos[start], qvel[start])
+    return {
+        "dataset_index": start,
+        "qpos": qpos[start].astype(np.float64),
+        "qvel": qvel[start].astype(np.float64),
+        "obs": _current_obs(env),
+    }
+
+
+def _sample_all_candidate_plans(
+    agent: DiscreteDiffusionSDE,
+    normalizer,
+    obs: np.ndarray,
+    prior: torch.Tensor,
+    args,
+    config: dict,
+    obs_dim: int,
+    act_dim: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    obs_norm = torch.tensor(normalizer.normalize(obs[None, :]), device=args.device, dtype=torch.float32)
+    prior.zero_()
+    prior[:, 0, :obs_dim] = obs_norm
+
+    sampling = _resolve_sampling_params(config, args)
+    traj, log = agent.sample(
+        prior,
+        solver=sampling["solver"],
+        n_samples=args.num_candidates,
+        sample_steps=sampling["sample_steps"],
+        sample_step_schedule=args.sample_step_schedule,
+        use_ema=args.use_ema,
+        w_cg=config["w_cg"],
+        guidance_mode=config["guidance_mode"],
+        optimization_guidance_scale=config["optimization_guidance_scale"],
+        optimization_guidance_last_steps=sampling["optimization_guidance_last_steps"],
+        temperature=sampling["temperature"],
+        ddim_eta=sampling["ddim_eta"],
+    )
+
+    plans = traj.view(args.num_candidates, args.horizon, obs_dim + act_dim).detach()
+    planned_obs = normalizer.unnormalize(plans[:, :, :obs_dim].cpu().numpy())
+    planned_act = np.clip(plans[:, :, obs_dim:].cpu().numpy(), -1.0, 1.0)
+
+    with torch.no_grad():
+        t_zero = torch.zeros((args.num_candidates,), dtype=torch.float32, device=args.device)
+        reward_traj_a = agent.classifier.logp(plans, t_zero, None).view(-1).cpu().numpy()
+
+    if log.get("log_p") is not None:
+        sample_logp = log["log_p"].view(args.num_candidates, -1).sum(-1).detach().cpu().numpy()
+    else:
+        sample_logp = reward_traj_a.copy()
+
+    return planned_obs.astype(np.float32), planned_act.astype(np.float32), reward_traj_a.astype(np.float64), sample_logp.astype(np.float64)
+
+
+def _open_loop_rollout(
+    env,
+    qpos: np.ndarray,
+    qvel: np.ndarray,
+    actions: np.ndarray,
+    horizon: int,
+    obs_dim: int,
+) -> tuple[np.ndarray, float]:
+    env_reset(env)
+    _set_mujoco_state(env, qpos, qvel)
+    rollout_obs = np.zeros((horizon, obs_dim), dtype=np.float32)
+    total_reward = 0.0
+
+    for t in range(horizon):
+        rollout_obs[t] = _current_obs(env)[:obs_dim]
+        if t >= horizon - 1:
+            break
+        _, rew, done, _ = env_step(env, actions[t])
+        total_reward += float(rew)
+        if done:
+            rollout_obs[t + 1 :] = rollout_obs[t]
+            break
+
+    return rollout_obs, total_reward
+
+
+def _evaluate_config_on_init(
+    env,
+    agent: DiscreteDiffusionSDE,
+    normalizer,
+    obs_std: np.ndarray,
+    prior: torch.Tensor,
+    init: dict,
+    args,
+    config: dict,
+    obs_dim: int,
+    act_dim: int,
+    score_env,
+) -> dict:
+    validate_guidance_config(
+        str(config["guidance_mode"]),
+        float(config["w_cg"]),
+        float(config["optimization_guidance_scale"]),
+    )
+
+    set_seed(args.comparison_seed)
+    planned_obs, planned_act, reward_traj_a, sample_logp = _sample_all_candidate_plans(
+        agent,
+        normalizer,
+        init["obs"],
+        prior,
+        args,
+        config,
+        obs_dim,
+        act_dim,
+    )
+
+    qpos = init["qpos"]
+    qvel = init["qvel"]
+    per_candidate = []
+    for cand_idx in range(args.num_candidates):
+        rollout_obs, reward_traj_b = _open_loop_rollout(
+            env,
+            qpos,
+            qvel,
+            planned_act[cand_idx],
+            args.horizon,
+            obs_dim,
+        )
+        gaps = _feasibility_gaps(
+            planned_obs[cand_idx],
+            rollout_obs,
+            obs_std,
+            store_per_step=False,
+        )
+        per_candidate.append(
+            {
+                "candidate_idx": cand_idx,
+                "mean_l2_norm_all": float(gaps["mean_l2_norm_all"]),
+                "mean_l2_norm_future": float(gaps["mean_l2_norm_future"]),
+                "mean_l2_all": float(gaps["mean_l2_all"]),
+                "reward_traj_a_classifier": float(reward_traj_a[cand_idx]),
+                "reward_traj_a_sample_logp": float(sample_logp[cand_idx]),
+                "reward_traj_b_rollout": float(reward_traj_b),
+                "normalized_score_traj_b_x100": float(score_env.get_normalized_score(reward_traj_b) * 100.0),
+            }
+        )
+
+    def collect(key: str) -> list[float]:
+        return [row[key] for row in per_candidate]
+
+    sampling = _resolve_sampling_params(config, args)
+    summary = {
+        "config": config["name"],
+        "guidance_mode": config["guidance_mode"],
+        "w_cg": float(config["w_cg"]),
+        "optimization_guidance_scale": float(config["optimization_guidance_scale"]),
+        "solver": sampling["solver"],
+        "temperature": sampling["temperature"],
+        "sampling_steps": sampling["sample_steps"],
+        "optimization_guidance_last_steps": sampling["optimization_guidance_last_steps"],
+        "ddim_eta": sampling["ddim_eta"],
+        "n_candidates": args.num_candidates,
+        "mean_l2_norm_all": _mean_std(collect("mean_l2_norm_all")),
+        "mean_l2_norm_future": _mean_std(collect("mean_l2_norm_future")),
+        "mean_l2_all": _mean_std(collect("mean_l2_all")),
+        "reward_traj_a_classifier": _mean_std(collect("reward_traj_a_classifier")),
+        "reward_traj_a_sample_logp": _mean_std(collect("reward_traj_a_sample_logp")),
+        "reward_traj_b_rollout": _mean_std(collect("reward_traj_b_rollout")),
+        "normalized_score_traj_b_x100": _mean_std(collect("normalized_score_traj_b_x100")),
+        "per_candidate": per_candidate,
+    }
+    return summary
+
+
+def _print_candidate_summary(label: str, mean: float, std: float) -> None:
+    _log(f"  {label:34s} {mean:10.4f} ± {std:8.4f}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo-dir", default="/u/rzhang26/CleanDiffuser")
+    parser.add_argument("--task", default="hopper-medium-v2")
+    parser.add_argument("--ckpt", default="latest")
+    parser.add_argument("--sim-env-name", default="hopper-medium-v2")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--seed-start", type=int, default=0, help="Base seed; trial i uses seed_start + i.")
+    parser.add_argument("--num-seeds", type=int, default=10)
+    parser.add_argument("--num-candidates", type=int, default=64)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--horizon", type=int, default=None)
+    parser.add_argument("--model-dim", type=int, default=32)
+    parser.add_argument("--dim-mult", default=None)
+    parser.add_argument("--diffusion-steps", type=int, default=20)
+    parser.add_argument("--sampling-steps", type=int, default=100)
+    parser.add_argument("--training-diffusion-steps", type=int, default=20)
+    parser.add_argument("--sample-step-schedule", default="uniform")
+    parser.add_argument("--optimization-guidance-last-steps", type=int, default=None)
+    parser.add_argument("--optimization-scale", type=float, default=0.1)
+    parser.add_argument("--solver", default="ddim")
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--predict-noise", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--ema-rate", type=float, default=0.9999)
+    parser.add_argument("--action-loss-weight", type=float, default=10.0)
+    parser.add_argument("--terminal-penalty", type=float, default=-100.0)
+    parser.add_argument("--discount", type=float, default=0.997)
+    parser.add_argument(
+        "--config-preset",
+        default="default",
+        choices=["default", "ep150", "ep150_plus_opt0"],
+        help="Guidance config set: default (legacy), ep150, or ep150 + opt scale=0.",
+    )
+    args = parser.parse_args()
+
+    repo_dir = Path(args.repo_dir)
+    task_settings = _load_task_settings(repo_dir, args.task)
+    if args.horizon is None:
+        args.horizon = int(task_settings["horizon"])
+    if args.dim_mult is None:
+        args.dim_mult = task_settings["dim_mult"]
+    elif isinstance(args.dim_mult, str):
+        args.dim_mult = [int(x) for x in args.dim_mult.split(",") if x.strip()]
+    else:
+        args.dim_mult = list(args.dim_mult)
+
+    args.device = args.device if torch.cuda.is_available() else "cpu"
+    if args.optimization_guidance_last_steps is None:
+        args.optimization_guidance_last_steps = args.sampling_steps // 2
+
+    if args.config_preset == "ep150":
+        configs = EP150_FEASIBILITY_CONFIGS
+    elif args.config_preset == "ep150_plus_opt0":
+        configs = EP150_PLUS_OPT0_FEASIBILITY_CONFIGS
+    else:
+        configs = build_configs(
+            opt_scales=[args.optimization_scale],
+            include_monte_carlo=True,
+            config_names=DEFAULT_CONFIGS,
+        )
+
+    save_path = f"results/diffuser_d4rl_mujoco/{args.task}/"
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = repo_dir / save_path / "dynamic_feasibility_hopper_v2" / run_tag
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_json = Path(args.output_json) if args.output_json else output_dir / "summary.json"
+
+    _log("============================================================")
+    _log("Dynamic feasibility comparison (hopper-v2 rollout)")
+    _log("============================================================")
+    _log(f"task={args.task} ckpt={args.ckpt} sim_env={args.sim_env_name}")
+    _log(f"device={args.device} cuda_available={torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        _log(f"gpu={torch.cuda.get_device_name(0)}")
+    _log(
+        f"solver={args.solver} sampling_steps={args.sampling_steps} "
+        f"temperature={args.temperature} num_candidates={args.num_candidates}"
+    )
+    _log(f"config_preset={args.config_preset}")
+    _log(f"configs={[c['name'] for c in configs]}")
+    _log(f"num_seeds={args.num_seeds} seed_start={args.seed_start}")
+    _log(f"output_json={output_json}")
+
+    env_data = gym.make(args.task)
+    raw_dataset = env_data.get_dataset()
+    env_data.close()
+    for key in ("infos/qpos", "infos/qvel"):
+        if key not in raw_dataset:
+            raise KeyError(f"{key} missing from dataset.")
+
+    dataset = D4RLMuJoCoDataset(
+        raw_dataset,
+        horizon=args.horizon,
+        terminal_penalty=args.terminal_penalty,
+        discount=args.discount,
+    )
+    obs_dim, act_dim = dataset.o_dim, dataset.a_dim
+    normalizer = dataset.get_normalizer()
+    obs_std = _obs_std_vector(normalizer, obs_dim)
+
+    agent = _load_agent(args, save_path, obs_dim, act_dim, args.horizon)
+    env_eval, sim_name = make_sim_eval_env(
+        args.task,
+        sim_env_name=args.sim_env_name,
+        render=False,
+        ignore_termination=False,
+    )
+    score_env = gym.make(args.task)
+    _log(f"rollout sim env: {sim_name}")
+
+    prior = torch.zeros(
+        (args.num_candidates, args.horizon, obs_dim + act_dim),
+        device=args.device,
+    )
+
+    seed_trials = []
+    for trial_idx in range(args.num_seeds):
+        comparison_seed = args.seed_start + trial_idx
+        args.comparison_seed = comparison_seed
+        set_seed(comparison_seed)
+        rng = np.random.default_rng(comparison_seed)
+        init = _sample_one_init(env_eval, raw_dataset, rng)
+
+        _log("")
+        _log(f"=== Trial {trial_idx} | comparison_seed={comparison_seed} ===")
+        _log(
+            f"init dataset_index={init['dataset_index']} "
+            f"obs[0:3]={np.round(init['obs'][:3], 4).tolist()}"
+        )
+
+        config_results = []
+        for config in configs:
+            _log(f"-- config: {config['name']}")
+            result = _evaluate_config_on_init(
+                env_eval,
+                agent,
+                normalizer,
+                obs_std,
+                prior,
+                init,
+                args,
+                config,
+                obs_dim,
+                act_dim,
+                score_env,
+            )
+            config_results.append(result)
+            m, s = result["mean_l2_norm_all"]
+            _print_candidate_summary("mean_l2_norm_all (64 cand)", m, s)
+            m, s = result["reward_traj_a_classifier"]
+            _print_candidate_summary("reward_traj_a (classifier)", m, s)
+            m, s = result["reward_traj_b_rollout"]
+            _print_candidate_summary("reward_traj_b (rollout)", m, s)
+            m, s = result["normalized_score_traj_b_x100"]
+            _print_candidate_summary("norm_score_traj_b x100", m, s)
+
+        seed_trials.append(
+            {
+                "trial_idx": trial_idx,
+                "comparison_seed": comparison_seed,
+                "init": {
+                    "dataset_index": init["dataset_index"],
+                    "qpos": init["qpos"].astype(float).tolist(),
+                    "qvel": init["qvel"].astype(float).tolist(),
+                    "obs": init["obs"].astype(float).tolist(),
+                },
+                "configs": config_results,
+            }
+        )
+
+    env_eval.close()
+    score_env.close()
+
+    aggregate = {}
+    _log("\n========== Aggregate over seeds (per config, mean of per-seed candidate means) ==========")
+    for config in configs:
+        name = config["name"]
+        cfg_rows = []
+        for trial in seed_trials:
+            cfg = next(c for c in trial["configs"] if c["config"] == name)
+            cfg_rows.append(cfg)
+
+        def agg_metric(key: str) -> tuple[float, float]:
+            vals = [row[key][0] for row in cfg_rows]
+            return _mean_std(vals)
+
+        aggregate[name] = {
+            "n_seeds": args.num_seeds,
+            "mean_l2_norm_all": agg_metric("mean_l2_norm_all"),
+            "mean_l2_norm_future": agg_metric("mean_l2_norm_future"),
+            "reward_traj_a_classifier": agg_metric("reward_traj_a_classifier"),
+            "reward_traj_b_rollout": agg_metric("reward_traj_b_rollout"),
+            "normalized_score_traj_b_x100": agg_metric("normalized_score_traj_b_x100"),
+            "guidance_mode": config["guidance_mode"],
+            "w_cg": float(config["w_cg"]),
+            "optimization_guidance_scale": float(config["optimization_guidance_scale"]),
+        }
+        m, s = aggregate[name]["mean_l2_norm_all"]
+        m_ra, s_ra = aggregate[name]["reward_traj_a_classifier"]
+        m_rb, s_rb = aggregate[name]["reward_traj_b_rollout"]
+        _log(
+            f"{name:28s} l2_norm={m:7.4f}±{s:6.4f}  "
+            f"rewA={m_ra:7.2f}±{s_ra:6.2f}  rewB={m_rb:7.2f}±{s_rb:6.2f}"
+        )
+
+    payload = {
+        "task": args.task,
+        "ckpt": args.ckpt,
+        "sim_env": sim_name,
+        "device": args.device,
+        "horizon": args.horizon,
+        "num_seeds": args.num_seeds,
+        "seed_start": args.seed_start,
+        "num_candidates": args.num_candidates,
+        "solver": args.solver,
+        "sampling_steps": args.sampling_steps,
+        "temperature": args.temperature,
+        "config_preset": args.config_preset,
+        "configs": configs,
+        "seed_trials": seed_trials,
+        "aggregate": aggregate,
+        "method": (
+            "For each seed trial: sample one random dataset episode start, then for each "
+            "guidance config reset RNG to the same comparison_seed and draw 64 diffusion "
+            "plans (trajA). Open-loop rollout each candidate's actions in hopper-v2 (trajB). "
+            "Normalized L2 divides obs errors by dataset Gaussian std. trajA reward is "
+            "classifier predicted cumulative reward; trajB reward is simulator rollout sum."
+        ),
+    }
+
+    with open(output_json, "w") as f:
+        json.dump(payload, f, indent=2)
+    _log(f"\nSaved {output_json}")
+
+
+if __name__ == "__main__":
+    main()

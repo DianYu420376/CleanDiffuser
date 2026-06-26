@@ -38,6 +38,11 @@ def set_seed(seed: int):
     random.seed(seed)
 
 
+def set_episode_seed(seed: int) -> None:
+    """Seed PyTorch, NumPy, and Python RNGs for one eval episode."""
+    set_seed(seed)
+
+
 class Timer:
     def __init__(self):
         self.tik = None

@@ -211,7 +211,7 @@ class DDIM(DiffusionModel):
             x_theta = compute_pi_t(x_eval, eps_theta, True, alphas[i], sigmas[i])
             if use_opt_guidance:
                 xt = optimization_backward_step(
-                    xt, x_theta, sigmas[i], sigmas[i + 1]
+                    xt, x_theta, alphas[i], sigmas[i], alphas[i + 1], sigmas[i + 1]
                 )
             else:
                 xt = vp_ddim_reverse_step(

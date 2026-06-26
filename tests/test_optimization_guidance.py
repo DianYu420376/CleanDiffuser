@@ -89,10 +89,16 @@ def test_apply_optimization_guidance_at_step_last_half():
 def test_optimization_backward_step_matches_pdf_sigma_ratio():
     xt = torch.tensor([[[1.0, 0.0]]])
     pi_t = torch.tensor([[[2.0, 1.0]]])
+    alpha_curr = torch.tensor(0.8)
     sigma_curr = torch.tensor(0.6)
+    alpha_prev = torch.tensor(0.9)
     sigma_prev = torch.tensor(0.435889894)
-    step = optimization_backward_step(xt, pi_t, sigma_curr, sigma_prev)
-    expected = (sigma_prev / sigma_curr) * xt + (1.0 - sigma_prev / sigma_curr) * pi_t
+    step = optimization_backward_step(
+        xt, pi_t, alpha_curr, sigma_curr, alpha_prev, sigma_prev
+    )
+    sigma_ratio = sigma_prev / sigma_curr
+    coef_pi = alpha_prev - sigma_prev * alpha_curr / sigma_curr
+    expected = sigma_ratio * xt + coef_pi * pi_t
     assert torch.allclose(step, expected)
 
 
@@ -100,18 +106,19 @@ def test_optimization_backward_uses_xt_and_pi_not_collapsed():
     xt = torch.tensor([[[1.0, 0.0]]])
     x_shift = torch.tensor([[[3.0, 2.0]]])
     eps_shift = torch.tensor([[[0.5, -0.25]]])
-    alpha = torch.tensor(0.8)
-    sigma = torch.tensor(0.6)
-    sigma_next = torch.tensor(0.435889894)
-    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha, sigma)
-    step = optimization_backward_step(xt, pi_shift, sigma, sigma_next)
-    collapsed = (sigma_next / sigma) * x_shift + (1.0 - sigma_next / sigma) * pi_shift
-    assert not torch.allclose(step, collapsed, atol=TOL)
-    assert torch.allclose(
-        step,
-        (sigma_next / sigma) * xt + (1.0 - sigma_next / sigma) * pi_shift,
-        atol=TOL,
+    alpha_curr = torch.tensor(0.8)
+    sigma_curr = torch.tensor(0.6)
+    alpha_prev = torch.tensor(0.9)
+    sigma_prev = torch.tensor(0.435889894)
+    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha_curr, sigma_curr)
+    step = optimization_backward_step(
+        xt, pi_shift, alpha_curr, sigma_curr, alpha_prev, sigma_prev
     )
+    sigma_ratio = sigma_prev / sigma_curr
+    coef_pi = alpha_prev - sigma_prev * alpha_curr / sigma_curr
+    collapsed = (sigma_prev / sigma_curr) * x_shift + coef_pi * pi_shift
+    assert not torch.allclose(step, collapsed, atol=TOL)
+    assert torch.allclose(step, sigma_ratio * xt + coef_pi * pi_shift, atol=TOL)
 
 
 def test_vp_ddim_reverse_step_mixes_xt_with_eps():
@@ -145,13 +152,15 @@ def test_vp_ddim_optimization_step_uses_chain_xt():
     xt = torch.tensor([[[1.0, 0.0]]])
     x_shift = torch.tensor([[[3.0, 2.0]]])
     eps_shift = torch.tensor([[[0.5, -0.25]]])
-    alpha = torch.tensor(0.8)
-    sigma = torch.tensor(0.6)
-    sigma_next = torch.tensor(0.435889894)
-    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha, sigma)
-    step = optimization_backward_step(xt, pi_shift, sigma, sigma_next)
+    alpha_curr = torch.tensor(0.8)
+    sigma_curr = torch.tensor(0.6)
     alpha_prev = torch.tensor(0.9)
-    wrong = alpha_prev * pi_shift + sigma_next * eps_shift
+    sigma_prev = torch.tensor(0.435889894)
+    pi_shift = compute_pi_t(x_shift, eps_shift, True, alpha_curr, sigma_curr)
+    step = optimization_backward_step(
+        xt, pi_shift, alpha_curr, sigma_curr, alpha_prev, sigma_prev
+    )
+    wrong = alpha_prev * pi_shift + sigma_prev * eps_shift
     assert not torch.allclose(step, wrong, atol=TOL)
 
 

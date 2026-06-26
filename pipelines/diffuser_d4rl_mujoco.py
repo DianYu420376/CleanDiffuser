@@ -32,7 +32,7 @@ from d4rl_render_utils import (
     resolve_ckpt_stem,
     setup_headless_rendering,
 )
-from utils import set_seed
+from utils import set_episode_seed, set_seed
 
 
 def _init_wandb(args):
@@ -145,9 +145,10 @@ def _rollout_single_env(
     act_dim,
     video_writer=None,
     ignore_termination: bool | None = None,
+    env_seed: int | None = None,
 ):
     prior = torch.zeros((1, args.task.horizon, obs_dim + act_dim), device=args.device)
-    obs = env_reset(env_eval)
+    obs = env_reset(env_eval, seed=env_seed)
     ep_reward = 0.0
     total_steps = 0
 
@@ -191,7 +192,7 @@ def _rollout_single_env(
         if done and not ignore_termination:
             fell = True
             if reset_on_done and total_steps < max_steps:
-                obs = env_reset(env_eval)
+                obs = env_reset(env_eval, seed=env_seed)
                 print(f"[render] env reset after fall (step={total_steps}/{max_steps})")
             else:
                 break
@@ -393,6 +394,8 @@ def pipeline(args):
 
             episode_metrics = []
             for episode_idx in range(args.num_episodes):
+                episode_seed = int(args.seed) + episode_idx
+                set_episode_seed(episode_seed)
                 writer = writers[episode_idx] if writers else None
                 ep_metrics = _rollout_single_env(
                     env_eval,
@@ -403,6 +406,7 @@ def pipeline(args):
                     act_dim,
                     video_writer=writer,
                     ignore_termination=ignore_termination,
+                    env_seed=episode_seed,
                 )
                 episode_metrics.append(ep_metrics)
                 if writer is not None:

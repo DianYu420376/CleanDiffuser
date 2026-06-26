@@ -458,6 +458,7 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             optimization_guidance_last_steps: int = 10,
+            ddim_eta: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -615,11 +616,13 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             elif solver == "ddim":
                 if use_opt_guidance:
                     xt = optimization_backward_step(
-                        xt, x_theta, sigmas[i], sigmas[i - 1]
+                        xt, x_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1],
+                        std=stds[i], eta=ddim_eta, add_noise=(i > 1),
                     )
                 else:
                     xt = vp_ddim_reverse_step(
-                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1]
+                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1],
+                        std=stds[i], eta=ddim_eta, add_noise=(i > 1),
                     )
 
             elif solver == "ode_dpmsolver_1":
@@ -832,6 +835,7 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             optimization_guidance_last_steps: int = 10,
+            ddim_eta: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -981,11 +985,13 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             elif solver == "ddim":
                 if use_opt_guidance:
                     xt = optimization_backward_step(
-                        xt, x_theta, sigmas[i], sigmas[i - 1]
+                        xt, x_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1],
+                        std=stds[i], eta=ddim_eta, add_noise=(i > 1),
                     )
                 else:
                     xt = vp_ddim_reverse_step(
-                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1]
+                        xt, eps_theta, alphas[i], sigmas[i], alphas[i - 1], sigmas[i - 1],
+                        std=stds[i], eta=ddim_eta, add_noise=(i > 1),
                     )
 
             elif solver == "ode_dpmsolver_1":

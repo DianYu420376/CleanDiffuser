@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from d4rl_render_utils import env_reset, env_step, is_offline_d4rl_env, make_sim_eval_env
 from diffuser_d4rl_mujoco import _load_checkpoints  # noqa: E402
-from utils import set_seed
+from utils import set_episode_seed
 
 from cleandiffuser.dataset.d4rl_mujoco_dataset import D4RLMuJoCoDataset
 from cleandiffuser.classifier import CumRewClassifier
@@ -67,7 +67,9 @@ def _select_action(agent, prior, obs_norm, args, obs_dim, act_dim):
         w_cg=args.task.w_cg,
         guidance_mode=args.guidance_mode,
         optimization_guidance_scale=args.optimization_guidance_scale,
+        optimization_guidance_last_steps=args.optimization_guidance_last_steps,
         temperature=args.temperature,
+        ddim_eta=args.ddim_eta,
     )
     sample_s = time.perf_counter() - t0
 
@@ -78,10 +80,10 @@ def _select_action(agent, prior, obs_norm, args, obs_dim, act_dim):
     return act, sample_s, float(logp[idx, 0])
 
 
-def benchmark_sample(agent, normalizer, args, obs_dim, act_dim, env_eval):
+def benchmark_sample(agent, normalizer, args, obs_dim, act_dim, env_eval, env_seed: int = 0):
     """Time one diffusion sample to estimate rollout wall-clock."""
     prior = torch.zeros((1, args.task.horizon, obs_dim + act_dim), device=args.device)
-    obs = env_reset(env_eval)
+    obs = env_reset(env_eval, seed=env_seed)
     obs_norm = torch.tensor(normalizer.normalize(obs[None, :]), device=args.device, dtype=torch.float32)
     if args.device.startswith("cuda"):
         torch.cuda.synchronize()
@@ -102,9 +104,10 @@ def rollout_with_trajectory(
     episode_idx: int = 0,
     log_interval: int = 5,
     expected_sample_s: float | None = None,
+    env_seed: int | None = None,
 ):
     prior = torch.zeros((1, args.task.horizon, obs_dim + act_dim), device=args.device)
-    obs = env_reset(env_eval)
+    obs = env_reset(env_eval, seed=env_seed)
     ep_reward = 0.0
     heights = []
     angles = []
@@ -219,6 +222,7 @@ def build_agent(args, obs_dim, act_dim):
         device=args.device,
         diffusion_steps=args.diffusion_steps,
         predict_noise=args.predict_noise,
+        noise_schedule=getattr(args, "noise_schedule", "cosine"),
     )
     return agent
 
@@ -238,6 +242,32 @@ def main():
     parser.add_argument("--guidance_mode", default=None, choices=["standard", "optimization"])
     parser.add_argument("--optimization_guidance_scale", type=float, default=None)
     parser.add_argument("--w_cg", type=float, default=None)
+    parser.add_argument(
+        "--sim-env-name",
+        default="hopper-medium-v2",
+        help="Physics env for rollout (native mujoco_py hopper-v2 for hopper-medium-v2).",
+    )
+    parser.add_argument("--solver", default=None, help="Diffusion solver, e.g. ddim or ddpm.")
+    parser.add_argument("--sampling-steps", type=int, default=None, help="Backward diffusion steps.")
+    parser.add_argument("--temperature", type=float, default=None, help="Initial diffusion noise scale.")
+    parser.add_argument(
+        "--optimization-guidance-last-steps",
+        type=int,
+        default=None,
+        help="Apply optimization guidance on the last N reverse diffusion steps.",
+    )
+    parser.add_argument(
+        "--noise-schedule",
+        default="cosine",
+        choices=["linear", "cosine"],
+        help="Alpha/sigma noise schedule for DDIM and other solvers.",
+    )
+    parser.add_argument(
+        "--ddim-eta",
+        type=float,
+        default=0.0,
+        help="DDIM stochasticity in [0, 1]; 0=deterministic, 1=full DDPM noise scale.",
+    )
     args_cli = parser.parse_args()
 
     base = OmegaConf.load(Path(__file__).resolve().parent / args_cli.config)
@@ -251,8 +281,21 @@ def main():
         args.optimization_guidance_scale = args_cli.optimization_guidance_scale
     if args_cli.w_cg is not None:
         args.task.w_cg = args_cli.w_cg
+    args.sim_env_name = args_cli.sim_env_name
+    if args_cli.solver is not None:
+        args.solver = args_cli.solver
+    if args_cli.sampling_steps is not None:
+        args.sampling_steps = args_cli.sampling_steps
+    if args_cli.temperature is not None:
+        args.temperature = args_cli.temperature
+    if args_cli.optimization_guidance_last_steps is not None:
+        args.optimization_guidance_last_steps = args_cli.optimization_guidance_last_steps
+    else:
+        args.optimization_guidance_last_steps = 10
+    args.noise_schedule = args_cli.noise_schedule
+    args.ddim_eta = args_cli.ddim_eta
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    set_seed(args_cli.seed)
+    set_episode_seed(args_cli.seed)
 
     save_path = f"results/{args.pipeline_name}/{args.task.env_name}/"
     env = gym.make(args.task.env_name)
@@ -267,6 +310,8 @@ def main():
     agent = build_agent(args, obs_dim, act_dim)
     _load_checkpoints(agent, save_path, args.ckpt)
     agent.eval()
+    diffusion_param_device = next(agent.model["diffusion"].parameters()).device
+    classifier_param_device = next(agent.classifier.model.parameters()).device
     normalizer = dataset.get_normalizer()
 
     use_sim_fallback = is_offline_d4rl_env(env)
@@ -283,11 +328,17 @@ def main():
         f"[eval] Checkpoint: {args_cli.ckpt}, episodes: {args_cli.num_episodes}, "
         f"max_steps: {args_cli.max_steps}, log_interval: {args_cli.log_interval}"
     )
+    _log(f"[eval] Device: {args.device} (cuda_available={torch.cuda.is_available()})")
+    if torch.cuda.is_available():
+        _log(f"[eval] GPU: {torch.cuda.get_device_name(0)}")
+    _log(f"[eval] Model param devices: diffusion={diffusion_param_device}, classifier={classifier_param_device}")
     _log(
-        f"[eval] Sampling config: num_candidates={args.num_candidates}, "
-        f"sampling_steps={args.sampling_steps}, w_cg={args.task.w_cg}, "
+        f"[eval] Sampling config: solver={args.solver}, num_candidates={args.num_candidates}, "
+        f"sampling_steps={args.sampling_steps}, temperature={args.temperature}, w_cg={args.task.w_cg}, "
         f"guidance_mode={args.guidance_mode}, "
-        f"optimization_guidance_scale={args.optimization_guidance_scale}"
+        f"optimization_guidance_scale={args.optimization_guidance_scale}, "
+        f"optimization_guidance_last_steps={args.optimization_guidance_last_steps}, "
+        f"noise_schedule={args.noise_schedule}, ddim_eta={args.ddim_eta}"
     )
 
     _log("[eval] Benchmarking one agent.sample() call...")
@@ -300,9 +351,11 @@ def main():
     )
 
     episodes = []
+    score_env = gym.make(args.task.env_name)
     run_start = time.perf_counter()
     for ep in range(args_cli.num_episodes):
-        set_seed(args_cli.seed + ep)
+        episode_seed = args_cli.seed + ep
+        set_episode_seed(episode_seed)
         ep_result = rollout_with_trajectory(
             env_eval,
             agent,
@@ -314,16 +367,27 @@ def main():
             episode_idx=ep,
             log_interval=args_cli.log_interval,
             expected_sample_s=sample_s,
+            env_seed=episode_seed,
         )
         ep_result["episode"] = ep
+        ep_result["seed"] = episode_seed
+        normalized = float(score_env.get_normalized_score(ep_result["total_reward"]))
+        ep_result["normalized_score"] = normalized
+        ep_result["normalized_score_x100"] = normalized * 100.0
         episodes.append(ep_result)
         _log(
             f"[episode {ep} summary] class={ep_result['classification']}, "
             f"survival={ep_result['survival_steps']}, reward={ep_result['total_reward']:.1f}, "
+            f"norm_x100={ep_result['normalized_score_x100']:.2f}, "
             f"fall_step={ep_result['first_fall_step']}, min_z={ep_result['min_height']:.3f}"
         )
 
+    score_env.close()
     env_eval.close()
+
+    raw_rewards = np.array([e["total_reward"] for e in episodes], dtype=np.float64)
+    normalized_scores = np.array([e["normalized_score"] for e in episodes], dtype=np.float64)
+    normalized_scores_x100 = normalized_scores * 100.0
 
     summary = {
         "task": args.task.env_name,
@@ -332,12 +396,25 @@ def main():
         "seed": args_cli.seed,
         "guidance_mode": args.guidance_mode,
         "optimization_guidance_scale": float(args.optimization_guidance_scale),
+        "optimization_guidance_last_steps": int(args.optimization_guidance_last_steps),
         "w_cg": float(args.task.w_cg),
+        "solver": str(args.solver),
+        "sampling_steps": int(args.sampling_steps),
+        "temperature": float(args.temperature),
+        "noise_schedule": str(args.noise_schedule),
+        "ddim_eta": float(args.ddim_eta),
+        "device": str(args.device),
         "num_episodes": args_cli.num_episodes,
         "max_steps": args_cli.max_steps,
         "class_counts": {},
         "mean_survival_steps": float(np.mean([e["survival_steps"] for e in episodes])),
-        "mean_reward": float(np.mean([e["total_reward"] for e in episodes])),
+        "std_survival_steps": float(np.std([e["survival_steps"] for e in episodes], ddof=0)),
+        "mean_reward": float(raw_rewards.mean()),
+        "std_reward": float(raw_rewards.std(ddof=0)),
+        "mean_normalized_score": float(normalized_scores.mean()),
+        "std_normalized_score": float(normalized_scores.std(ddof=0)),
+        "mean_normalized_score_x100": float(normalized_scores_x100.mean()),
+        "std_normalized_score_x100": float(normalized_scores_x100.std(ddof=0)),
         "episodes": episodes,
     }
     for ep in episodes:
@@ -347,8 +424,16 @@ def main():
     _log("\n=== Trajectory Eval Summary ===")
     _log(json.dumps({k: v for k, v in summary.items() if k != "episodes"}, indent=2))
     _log(f"class_counts: {summary['class_counts']}")
+    _log(
+        f"[eval] reward={summary['mean_reward']:.2f} ± {summary['std_reward']:.2f} | "
+        f"normalized_x100={summary['mean_normalized_score_x100']:.2f} ± "
+        f"{summary['std_normalized_score_x100']:.2f}"
+    )
 
-    out = args_cli.output or f"results/{args.pipeline_name}/{args.task.env_name}/trajectory_eval_{args_cli.ckpt}.json"
+    out = args_cli.output or (
+        f"results/{args.pipeline_name}/{args.task.env_name}/"
+        f"trajectory_eval_{args_cli.ckpt}_seed{args_cli.seed}.json"
+    )
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump(summary, f, indent=2)

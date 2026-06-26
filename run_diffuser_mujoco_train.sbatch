@@ -1,19 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=diffuser_mujoco_train
+#SBATCH --job-name=diffuser-train
 #SBATCH --time=2-00:00:00
-#SBATCH --account=bgeo-dtai-gh
-#SBATCH --partition=ghx4
+#SBATCH --account=bgfg-delta-gpu
+#SBATCH --partition=gpuA100x4
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --output=slurm_diffuser_mujoco_train_%j.out
-#SBATCH --error=slurm_diffuser_mujoco_train_%j.err
+#SBATCH --output=slurm_diffuser_mujoco_train_%x_%j.out
+#SBATCH --error=slurm_diffuser_mujoco_train_%x_%j.err
 
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/u/rzhang26/CleanDiffuser}"
-VENV_DIR="${VENV_DIR:-/u/rzhang26/venvs/CleanDiffuser}"
-D4RL_DIR="${D4RL_DIR:-/u/rzhang26/D4RL}"
+VENV_DIR="${VENV_DIR:-/u/rzhang26/venvs/cleandiffuser}"
 
 TASK="${TASK:-hopper-medium-v2}"
 SEED="${SEED:-0}"
@@ -24,14 +23,17 @@ DATASET_H5PATH="${DATASET_H5PATH:-}"
 
 cd "${REPO_DIR}"
 
+source "${VENV_DIR}/activate_cleandiffuser.sh"
+
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   echo "ERROR: venv python not found at ${VENV_DIR}/bin/python"
   exit 1
 fi
 
-export PYTHONPATH="${REPO_DIR}/pipelines:${REPO_DIR}:${D4RL_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_DIR}/pipelines:${REPO_DIR}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export D4RL_SUPPRESS_IMPORT_ERROR=1
+export MUJOCO_GL=egl
 export WANDB_MODE="${WANDB_MODE}"
 PYTHON="${VENV_DIR}/bin/python"
 

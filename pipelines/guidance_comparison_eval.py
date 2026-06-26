@@ -146,6 +146,7 @@ def _run_single_inference(
         f"guidance_mode={config['guidance_mode']}",
         f"optimization_guidance_scale={config['optimization_guidance_scale']}",
         f"task.w_cg={config['w_cg']}",
+        f"sim_env_name={task}",
         f"eval_output={eval_output}",
     ]
     if run_suffix:
@@ -190,7 +191,7 @@ def _format_row(name: str, mean: float, std: float, metric: str = "norm_x100") -
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-dir", default="/u/rzhang26/CleanDiffuser")
-    parser.add_argument("--python", default="/u/rzhang26/venvs/CleanDiffuser/bin/python")
+    parser.add_argument("--python", default="/u/rzhang26/venvs/cleandiffuser/bin/python")
     parser.add_argument("--task", default="hopper-medium-v2")
     parser.add_argument("--ckpt", default="latest")
     parser.add_argument("--run-suffix", default="")
