@@ -100,6 +100,9 @@ def _build_args(args_cli):
         args.optimization_guidance_last_steps = 10
     args.noise_schedule = args_cli.noise_schedule
     args.ddim_eta = args_cli.ddim_eta
+    args.optimization_guidance_alpha_sigma_scale = bool(
+        getattr(args_cli, "optimization_guidance_alpha_sigma_scale", False)
+    )
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     return args
 
@@ -118,7 +121,7 @@ def main() -> None:
     parser.add_argument("--stats-interval", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--sim-env-name", default="hopper-medium-v2")
-    parser.add_argument("--guidance_mode", default=None, choices=["standard", "optimization"])
+    parser.add_argument("--guidance_mode", default=None, choices=["standard", "optimization", "hybrid"])
     parser.add_argument("--optimization_guidance_scale", type=float, default=None)
     parser.add_argument("--w_cg", type=float, default=None)
     parser.add_argument("--solver", default=None)
@@ -127,6 +130,11 @@ def main() -> None:
     parser.add_argument("--optimization-guidance-last-steps", type=int, default=None)
     parser.add_argument("--noise-schedule", default="cosine", choices=["linear", "cosine"])
     parser.add_argument("--ddim-eta", type=float, default=0.0)
+    parser.add_argument(
+        "--optimization-guidance-alpha-sigma-scale",
+        action="store_true",
+        help="Scale optimization shift by sigma**2/alpha at each reverse step.",
+    )
     args_cli = parser.parse_args()
 
     log_path = Path(args_cli.log_file)
@@ -175,7 +183,8 @@ def main() -> None:
         f"stats_interval={args_cli.stats_interval}\n"
         f"solver={args.solver} temp={args.temperature} w_cg={args.task.w_cg} "
         f"guidance_mode={args.guidance_mode} opt_scale={args.optimization_guidance_scale} "
-        f"opt_last={args.optimization_guidance_last_steps} ddim_eta={args.ddim_eta}\n"
+        f"opt_last={args.optimization_guidance_last_steps} ddim_eta={args.ddim_eta} "
+        f"alpha_sigma_scale={getattr(args, 'optimization_guidance_alpha_sigma_scale', False)}\n"
         f"device={args.device} offline_fallback={use_sim_fallback}",
     )
 
@@ -269,6 +278,9 @@ def main() -> None:
         "temperature": float(args.temperature),
         "noise_schedule": str(args.noise_schedule),
         "ddim_eta": float(args.ddim_eta),
+        "optimization_guidance_alpha_sigma_scale": bool(
+            getattr(args, "optimization_guidance_alpha_sigma_scale", False)
+        ),
         "device": str(args.device),
         "max_steps": args_cli.max_steps,
         "stats_interval": args_cli.stats_interval,

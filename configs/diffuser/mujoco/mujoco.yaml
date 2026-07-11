@@ -47,6 +47,7 @@ temperature: 0.5
 use_ema: True
 guidance_mode: standard
 optimization_guidance_scale: 0.0
+optimization_guidance_alpha_sigma_scale: false
 # Optional JSON path for structured inference metrics (set by comparison eval scripts).
 eval_output: null
 

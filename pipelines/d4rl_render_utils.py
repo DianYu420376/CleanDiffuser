@@ -63,6 +63,14 @@ def setup_headless_rendering():
     os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", cuda_device.split(",")[0])
 
 
+def gym_v2_sim_env_name(d4rl_task_name: str) -> str:
+    """Return standalone OpenAI Gym v2 MuJoCo env for a D4RL v2 offline task."""
+    agent = parse_mujoco_agent(d4rl_task_name)
+    if agent in D4RL_MUJOCO_V2_GYM_FALLBACK:
+        return D4RL_MUJOCO_V2_GYM_FALLBACK[agent]
+    raise ValueError(f"No Gym v2 sim env mapping for task: {d4rl_task_name}")
+
+
 def make_sim_eval_env(
     d4rl_task_name: str,
     sim_env_name: Optional[str] = None,
@@ -91,18 +99,19 @@ def make_sim_eval_env(
     probe.close()
     agent = parse_mujoco_agent(d4rl_task_name)
     if agent in D4RL_MUJOCO_NATIVE_GYM_TASKS:
+        sim_name = gym_v2_sim_env_name(d4rl_task_name)
         print(
             f"[render] Task `{d4rl_task_name}` is offline-only; "
-            f"using native D4RL v2 mujoco_py `{d4rl_task_name}` for rollout."
+            f"using Gym v2 sim env `{sim_name}` for rollout."
         )
         return _make_env(
-            d4rl_task_name,
+            sim_name,
             render,
             render_width,
             render_height,
             backend="gym",
             ignore_termination=ignore_termination,
-        ), d4rl_task_name
+        ), sim_name
 
     sim_name = D4RL_MUJOCO_V2_GYM_FALLBACK[agent]
     print(

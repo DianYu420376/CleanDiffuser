@@ -127,6 +127,116 @@ EP150_PLUS_OPT0_FEASIBILITY_CONFIGS = EP150_FEASIBILITY_CONFIGS + [
 ]
 
 
+def _scale_label(scale: float) -> str:
+    return str(scale).replace(".", "p")
+
+
+def _standard_repo_config(w_cg: float) -> dict:
+    return {
+        "name": "standard_repo",
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": float(w_cg),
+        "solver": "ddpm",
+        "temperature": 0.5,
+        "sampling_steps": 20,
+    }
+
+
+def _monte_carlo_config() -> dict:
+    return {
+        "name": "monte_carlo_w_cg0",
+        "guidance_mode": "standard",
+        "optimization_guidance_scale": 0.0,
+        "w_cg": 0.0,
+        "solver": "ddpm",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+    }
+
+
+def _hybrid_opt_config(
+    opt_scale: float,
+    *,
+    w_cg: float = 1.1,
+    opt_last: int = 20,
+    name: str | None = None,
+) -> dict:
+    label = _scale_label(opt_scale)
+    wcg_label = _scale_label(w_cg)
+    return {
+        "name": name or f"hybrid_wcg{wcg_label}_opt{label}_optlast{opt_last}",
+        "guidance_mode": "hybrid",
+        "optimization_guidance_scale": float(opt_scale),
+        "w_cg": float(w_cg),
+        "solver": "ddim",
+        "temperature": 1.0,
+        "sampling_steps": 20,
+        "optimization_guidance_last_steps": int(opt_last),
+        "ddim_eta": 1.0,
+        "optimization_guidance_alpha_sigma_scale": True,
+    }
+
+
+EP150_STD_VS_OPT_PRESETS: dict[str, dict] = {
+    "hopper-medium-v2": {
+        "opt_scale": 0.09,
+        "w_cg": 0.09,
+        "opt_last": 20,
+        "hybrid_name": "hybrid_wcg0p09_opt0p09_optlast20",
+    },
+    "halfcheetah-medium-v2": {
+        "opt_scale": 0.0005,
+        "w_cg": 1.1,
+        "opt_last": 20,
+        "hybrid_name": "hybrid_wcg1p1_opt0p0005_optlast20",
+    },
+    "walker2d-medium-v2": {
+        "opt_scale": 0.05,
+        "w_cg": 1.1,
+        "opt_last": 20,
+        "hybrid_name": "hybrid_wcg1p1_opt0p05_optlast20",
+    },
+}
+
+
+def build_ep150_std_vs_opt_configs(
+    task: str,
+    task_settings: dict,
+    *,
+    opt_scale: float | None = None,
+    w_cg: float | None = None,
+    opt_last: int = 20,
+    hybrid_name: str | None = None,
+) -> list[dict]:
+    preset = EP150_STD_VS_OPT_PRESETS.get(task)
+    if preset is None and opt_scale is None:
+        raise ValueError(
+            f"No ep150_std_vs_opt preset for task={task!r}; pass --opt-scale explicitly."
+        )
+    resolved_opt_scale = float(opt_scale if opt_scale is not None else preset["opt_scale"])
+    if w_cg is not None:
+        resolved_w_cg = float(w_cg)
+    elif preset is not None and "w_cg" in preset:
+        resolved_w_cg = float(preset["w_cg"])
+    else:
+        resolved_w_cg = resolved_opt_scale
+    resolved_opt_last = int(preset["opt_last"] if preset is not None and opt_last == 20 else opt_last)
+    resolved_hybrid_name = hybrid_name
+    if resolved_hybrid_name is None and preset is not None:
+        resolved_hybrid_name = preset.get("hybrid_name")
+    return [
+        _monte_carlo_config(),
+        _standard_repo_config(float(task_settings["w_cg"])),
+        _hybrid_opt_config(
+            resolved_opt_scale,
+            w_cg=resolved_w_cg,
+            opt_last=resolved_opt_last,
+            name=resolved_hybrid_name,
+        ),
+    ]
+
+
 def _resolve_sampling_params(config: dict, args) -> dict:
     return {
         "solver": config.get("solver", args.solver),
@@ -234,6 +344,9 @@ def _sample_all_candidate_plans(
         optimization_guidance_last_steps=sampling["optimization_guidance_last_steps"],
         temperature=sampling["temperature"],
         ddim_eta=sampling["ddim_eta"],
+        optimization_guidance_alpha_sigma_scale=bool(
+            config.get("optimization_guidance_alpha_sigma_scale", False)
+        ),
     )
 
     plans = traj.view(args.num_candidates, args.horizon, obs_dim + act_dim).detach()
@@ -330,9 +443,10 @@ def _evaluate_config_on_init(
         per_candidate.append(
             {
                 "candidate_idx": cand_idx,
+                "mean_l2_all": float(gaps["mean_l2_all"]),
+                "mean_l2_future": float(gaps["mean_l2_future"]),
                 "mean_l2_norm_all": float(gaps["mean_l2_norm_all"]),
                 "mean_l2_norm_future": float(gaps["mean_l2_norm_future"]),
-                "mean_l2_all": float(gaps["mean_l2_all"]),
                 "reward_traj_a_classifier": float(reward_traj_a[cand_idx]),
                 "reward_traj_a_sample_logp": float(sample_logp[cand_idx]),
                 "reward_traj_b_rollout": float(reward_traj_b),
@@ -354,10 +468,14 @@ def _evaluate_config_on_init(
         "sampling_steps": sampling["sample_steps"],
         "optimization_guidance_last_steps": sampling["optimization_guidance_last_steps"],
         "ddim_eta": sampling["ddim_eta"],
+        "optimization_guidance_alpha_sigma_scale": bool(
+            config.get("optimization_guidance_alpha_sigma_scale", False)
+        ),
         "n_candidates": args.num_candidates,
+        "mean_l2_all": _mean_std(collect("mean_l2_all")),
+        "mean_l2_future": _mean_std(collect("mean_l2_future")),
         "mean_l2_norm_all": _mean_std(collect("mean_l2_norm_all")),
         "mean_l2_norm_future": _mean_std(collect("mean_l2_norm_future")),
-        "mean_l2_all": _mean_std(collect("mean_l2_all")),
         "reward_traj_a_classifier": _mean_std(collect("reward_traj_a_classifier")),
         "reward_traj_a_sample_logp": _mean_std(collect("reward_traj_a_sample_logp")),
         "reward_traj_b_rollout": _mean_std(collect("reward_traj_b_rollout")),
@@ -403,8 +521,25 @@ def main() -> None:
     parser.add_argument(
         "--config-preset",
         default="default",
-        choices=["default", "ep150", "ep150_plus_opt0"],
-        help="Guidance config set: default (legacy), ep150, or ep150 + opt scale=0.",
+        choices=["default", "ep150", "ep150_plus_opt0", "ep150_std_vs_opt"],
+        help="Guidance config set: default (legacy), ep150, ep150 + opt scale=0, or ep150 standard vs hybrid opt.",
+    )
+    parser.add_argument(
+        "--opt-scale",
+        type=float,
+        default=None,
+        help="Hybrid opt_scale for ep150_std_vs_opt preset (overrides task default).",
+    )
+    parser.add_argument(
+        "--opt-w-cg",
+        type=float,
+        default=None,
+        help="Hybrid w_cg for ep150_std_vs_opt preset (default: task preset or opt_scale).",
+    )
+    parser.add_argument(
+        "--configs-json",
+        default=None,
+        help="Optional JSON file with a list of guidance config dicts (overrides preset).",
     )
     args = parser.parse_args()
 
@@ -423,10 +558,22 @@ def main() -> None:
     if args.optimization_guidance_last_steps is None:
         args.optimization_guidance_last_steps = args.sampling_steps // 2
 
-    if args.config_preset == "ep150":
+    if args.configs_json:
+        with open(args.configs_json, encoding="utf-8") as f:
+            configs = json.load(f)
+        if not isinstance(configs, list):
+            raise ValueError(f"--configs-json must contain a list, got {type(configs)}")
+    elif args.config_preset == "ep150":
         configs = EP150_FEASIBILITY_CONFIGS
     elif args.config_preset == "ep150_plus_opt0":
         configs = EP150_PLUS_OPT0_FEASIBILITY_CONFIGS
+    elif args.config_preset == "ep150_std_vs_opt":
+        configs = build_ep150_std_vs_opt_configs(
+            args.task,
+            task_settings,
+            opt_scale=args.opt_scale,
+            w_cg=args.opt_w_cg,
+        )
     else:
         configs = build_configs(
             opt_scales=[args.optimization_scale],
@@ -439,12 +586,12 @@ def main() -> None:
         output_dir = Path(args.output_dir)
     else:
         run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = repo_dir / save_path / "dynamic_feasibility_hopper_v2" / run_tag
+        output_dir = repo_dir / save_path / "dynamic_feasibility" / run_tag
     output_dir.mkdir(parents=True, exist_ok=True)
     output_json = Path(args.output_json) if args.output_json else output_dir / "summary.json"
 
     _log("============================================================")
-    _log("Dynamic feasibility comparison (hopper-v2 rollout)")
+    _log("Dynamic feasibility comparison (open-loop rollout)")
     _log("============================================================")
     _log(f"task={args.task} ckpt={args.ckpt} sim_env={args.sim_env_name}")
     _log(f"device={args.device} cuda_available={torch.cuda.is_available()}")
@@ -523,6 +670,8 @@ def main() -> None:
                 score_env,
             )
             config_results.append(result)
+            m, s = result["mean_l2_all"]
+            _print_candidate_summary("mean_l2_all (64 cand, raw)", m, s)
             m, s = result["mean_l2_norm_all"]
             _print_candidate_summary("mean_l2_norm_all (64 cand)", m, s)
             m, s = result["reward_traj_a_classifier"]
@@ -564,6 +713,8 @@ def main() -> None:
 
         aggregate[name] = {
             "n_seeds": args.num_seeds,
+            "mean_l2_all": agg_metric("mean_l2_all"),
+            "mean_l2_future": agg_metric("mean_l2_future"),
             "mean_l2_norm_all": agg_metric("mean_l2_norm_all"),
             "mean_l2_norm_future": agg_metric("mean_l2_norm_future"),
             "reward_traj_a_classifier": agg_metric("reward_traj_a_classifier"),
@@ -573,11 +724,12 @@ def main() -> None:
             "w_cg": float(config["w_cg"]),
             "optimization_guidance_scale": float(config["optimization_guidance_scale"]),
         }
+        m_raw, s_raw = aggregate[name]["mean_l2_all"]
         m, s = aggregate[name]["mean_l2_norm_all"]
         m_ra, s_ra = aggregate[name]["reward_traj_a_classifier"]
         m_rb, s_rb = aggregate[name]["reward_traj_b_rollout"]
         _log(
-            f"{name:28s} l2_norm={m:7.4f}±{s:6.4f}  "
+            f"{name:28s} l2_raw={m_raw:7.4f}±{s_raw:6.4f}  l2_norm={m:7.4f}±{s:6.4f}  "
             f"rewA={m_ra:7.2f}±{s_ra:6.2f}  rewB={m_rb:7.2f}±{s_rb:6.2f}"
         )
 
@@ -600,10 +752,18 @@ def main() -> None:
         "method": (
             "For each seed trial: sample one random dataset episode start, then for each "
             "guidance config reset RNG to the same comparison_seed and draw 64 diffusion "
-            "plans (trajA). Open-loop rollout each candidate's actions in hopper-v2 (trajB). "
-            "Normalized L2 divides obs errors by dataset Gaussian std. trajA reward is "
-            "classifier predicted cumulative reward; trajB reward is simulator rollout sum."
+            "plans (trajA). Open-loop rollout each candidate's actions in the native sim env "
+            "(trajB). Per-step obs error is ||planned - rollout||_2. mean_l2_all is the raw "
+            "L2 gap; mean_l2_norm_all divides obs errors by dataset Gaussian std before L2. "
+            "trajA reward is classifier predicted cumulative reward; trajB reward is simulator "
+            "rollout sum."
         ),
+        "gap_metrics": {
+            "mean_l2_all": "Unnormalized mean per-step L2 obs gap.",
+            "mean_l2_future": "Unnormalized mean L2 obs gap over future steps (t>=1).",
+            "mean_l2_norm_all": "Normalized mean per-step L2 obs gap (error / dataset std).",
+            "mean_l2_norm_future": "Normalized mean L2 obs gap over future steps (t>=1).",
+        },
     }
 
     with open(output_json, "w") as f:

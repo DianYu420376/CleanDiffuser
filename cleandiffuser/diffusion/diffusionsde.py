@@ -14,6 +14,7 @@ from .basic import DiffusionModel
 from .guidance import (
     apply_optimization_guidance_at_step,
     should_apply_optimization_guidance,
+    should_apply_standard_classifier_guidance,
     compute_optimization_shift,
     compute_pi_t,
     compute_reward_gradient,
@@ -241,28 +242,39 @@ class BaseDiffusionSDE(DiffusionModel):
             prior=None,
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
-            apply_optimization_guidance: bool = True):
+            apply_optimization_guidance: bool = True,
+            optimization_guidance_alpha_sigma_scale: bool = False):
         """
         One-step epsilon/x0 prediction with guidance.
 
         Standard mode applies CFG on x_t, then classifier guidance on the score.
         Optimization mode evaluates the denoiser at x_t + η∇R(x_t) only; the
         shifted posterior mean π_t is combined with x_t in the backward update.
-        When ``apply_optimization_guidance`` is False, optimization mode falls
-        back to unguided standard sampling for that step.
+        Hybrid mode uses classifier guidance before the last N steps, then
+        optimization guidance on the last N steps.
+        When ``apply_optimization_guidance`` is False, optimization/hybrid modes fall
+        back to standard classifier guidance (if w_cg > 0) for that step.
         """
         validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
 
         if (
-            guidance_mode == "optimization"
-            and apply_optimization_guidance
+            apply_optimization_guidance
             and optimization_guidance_scale != 0.0
+            and guidance_mode in ("optimization", "hybrid")
         ):
             logp, grad = compute_reward_gradient(
                 xt, t, self.classifier, condition_cg, self.fix_mask
             )
+            alpha_arg = alpha if optimization_guidance_alpha_sigma_scale else None
+            sigma_arg = sigma if optimization_guidance_alpha_sigma_scale else None
             x_shift = compute_optimization_shift(
-                xt, grad, optimization_guidance_scale, self.fix_mask, prior
+                xt,
+                grad,
+                optimization_guidance_scale,
+                self.fix_mask,
+                prior,
+                alpha=alpha_arg,
+                sigma=sigma_arg,
             )
             pred = self.classifier_free_guidance(
                 x_shift, t, model, condition_cfg, w_cfg, None, None, requires_grad)
@@ -271,8 +283,11 @@ class BaseDiffusionSDE(DiffusionModel):
         pred = self.classifier_free_guidance(
             xt, t, model, condition_cfg, w_cfg, None, None, requires_grad)
 
-        pred, logp = self.classifier_guidance(
-            xt, t, alpha, sigma, model, condition_cg, w_cg, pred)
+        if guidance_mode in ("standard", "hybrid") and w_cg != 0.0:
+            pred, logp = self.classifier_guidance(
+                xt, t, alpha, sigma, model, condition_cg, w_cg, pred)
+        else:
+            logp = None
 
         return pred, logp, xt
 
@@ -458,6 +473,7 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             optimization_guidance_last_steps: int = 10,
+            optimization_guidance_alpha_sigma_scale: bool = False,
             ddim_eta: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
@@ -596,7 +612,8 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
                 model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
                 prior=prior, guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale,
-                apply_optimization_guidance=use_opt_guidance)
+                apply_optimization_guidance=use_opt_guidance,
+                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale)
 
             # clip the prediction
             pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])
@@ -835,6 +852,7 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             optimization_guidance_last_steps: int = 10,
+            optimization_guidance_alpha_sigma_scale: bool = False,
             ddim_eta: float = 0.0,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
@@ -965,7 +983,8 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
                 model, condition_vec_cfg, w_cfg, condition_vec_cg, w_cg, requires_grad,
                 prior=prior, guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale,
-                apply_optimization_guidance=use_opt_guidance)
+                apply_optimization_guidance=use_opt_guidance,
+                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale)
 
             # clip the prediction
             pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])

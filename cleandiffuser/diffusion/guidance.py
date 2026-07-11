@@ -8,7 +8,7 @@ import torch
 
 from cleandiffuser.utils import at_least_ndim
 
-SUPPORTED_GUIDANCE_MODES = ("standard", "optimization")
+SUPPORTED_GUIDANCE_MODES = ("standard", "optimization", "hybrid")
 
 
 def should_apply_optimization_guidance(
@@ -17,12 +17,29 @@ def should_apply_optimization_guidance(
     last_steps: int,
     optimization_guidance_scale: float,
 ) -> bool:
-    """True when optimization shift/backward (η>0) is active on this reverse step."""
+    """True when optimization shift/backward is active on this reverse step."""
     return (
-        guidance_mode == "optimization"
+        guidance_mode in ("optimization", "hybrid")
         and optimization_guidance_scale != 0.0
         and apply_optimization_guidance_at_step(loop_i, last_steps)
     )
+
+
+def should_apply_standard_classifier_guidance(
+    guidance_mode: str,
+    loop_i: int,
+    last_steps: int,
+    w_cg: float,
+    use_optimization_guidance: bool,
+) -> bool:
+    """True when classifier guidance (w_cg) should modify the score on this step."""
+    if w_cg == 0.0:
+        return False
+    if guidance_mode == "standard":
+        return True
+    if guidance_mode == "hybrid":
+        return not use_optimization_guidance
+    return False
 
 
 def apply_optimization_guidance_at_step(
@@ -52,7 +69,12 @@ def validate_guidance_config(
         raise ValueError(
             "guidance_mode='optimization' is incompatible with w_cg != 0. "
             "Optimization guidance evaluates E[x_0|x_t] at a shifted point and "
-            "uses the native VP reverse step; set w_cg=0.0."
+            "uses the native VP reverse step; set w_cg=0.0 or use guidance_mode='hybrid'."
+        )
+    if guidance_mode == "hybrid" and w_cg == 0.0 and optimization_guidance_scale == 0.0:
+        raise ValueError(
+            "guidance_mode='hybrid' requires at least one of w_cg or "
+            "optimization_guidance_scale to be non-zero."
         )
 
 
@@ -77,9 +99,20 @@ def compute_optimization_shift(
     optimization_guidance_scale: float,
     fix_mask: Optional[torch.Tensor] = None,
     prior: Optional[torch.Tensor] = None,
+    alpha: Optional[Union[torch.Tensor, float]] = None,
+    sigma: Optional[Union[torch.Tensor, float]] = None,
 ) -> torch.Tensor:
-    """Build x_t + η ∇R(x_t) for evaluating π_t at a reward-ascending point."""
-    x_shift = xt + optimization_guidance_scale * grad
+    """Build x_t + η ∇R(x_t) for evaluating π_t at a reward-ascending point.
+
+    When ``alpha`` and ``sigma`` are provided, the effective step size is
+    ``optimization_guidance_scale * sigma**2 / alpha``.
+    """
+    scale = optimization_guidance_scale
+    if alpha is not None and sigma is not None:
+        alpha_b = at_least_ndim(alpha, xt.dim())
+        sigma_b = at_least_ndim(sigma, xt.dim())
+        scale = optimization_guidance_scale * (sigma_b ** 2) / alpha_b
+    x_shift = xt + scale * grad
     if fix_mask is not None and prior is not None:
         x_shift = x_shift * (1.0 - fix_mask) + prior * fix_mask
     return x_shift
@@ -124,7 +157,12 @@ def vp_ddim_reverse_step(
     ``std`` is the DDPM posterior std from ``DiscreteDiffusionSDE`` (``stds[i]``).
     """
     alpha_ratio = at_least_ndim(alpha_prev / alpha_curr, xt.dim())
-    mean = alpha_ratio * (xt - at_least_ndim(sigma_curr, xt.dim()) * eps_theta) + (at_least_ndim(sigma_prev, xt.dim()) ** 2 - eta**2*at_least_ndim(std, xt.dim()) ** 2 + 1e-8).sqrt() * eps_theta
+    std_term = 0.0
+    if std is not None and eta != 0.0:
+        std_term = eta ** 2 * at_least_ndim(std, xt.dim()) ** 2
+    mean = alpha_ratio * (xt - at_least_ndim(sigma_curr, xt.dim()) * eps_theta) + (
+        at_least_ndim(sigma_prev, xt.dim()) ** 2 - std_term + 1e-8
+    ).sqrt() * eps_theta
     if std is not None and eta != 0.0 and add_noise:
         mean = mean + eta * at_least_ndim(std, xt.dim()) * torch.randn_like(xt)
     return mean
@@ -154,7 +192,10 @@ def optimization_backward_step(
     ``std`` and ``eta`` are pass-through hooks for optional stochastic extensions
     (same convention as ``vp_ddim_reverse_step``).
     """
-    sigma_prev_prime = (at_least_ndim(sigma_prev, xt.dim()) ** 2 - eta**2*at_least_ndim(std, xt.dim()) ** 2 + 1e-8).sqrt()
+    std_term = 0.0
+    if std is not None and eta != 0.0:
+        std_term = eta ** 2 * at_least_ndim(std, xt.dim()) ** 2
+    sigma_prev_prime = (at_least_ndim(sigma_prev, xt.dim()) ** 2 - std_term + 1e-8).sqrt()
     sigma_ratio = at_least_ndim(sigma_prev_prime / sigma_curr, xt.dim())
     coef_pi = at_least_ndim(alpha_prev, xt.dim()) - at_least_ndim(
         alpha_curr * sigma_ratio, xt.dim()

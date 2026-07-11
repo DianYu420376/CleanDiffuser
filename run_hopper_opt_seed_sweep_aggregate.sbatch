@@ -10,35 +10,43 @@
 set -euo pipefail
 
 : "${ARRAY_JOB_ID:?Set ARRAY_JOB_ID to the SLURM array job id}"
-: "${SWEEP_LOG_PREFIX:?Set SWEEP_LOG_PREFIX (e.g. slurm_hopper_opt_scale005_seed_sweep)}"
 
 SEED_MIN="${SEED_MIN:-1}"
 SEED_MAX="${SEED_MAX:-15}"
 REPO_DIR="${REPO_DIR:-/u/rzhang26/CleanDiffuser}"
+LOG_DIR="${LOG_DIR:-${REPO_DIR}/logs/slurm/hybrid_guidance_seed_sweep}"
+RESULTS_DIR="${RESULTS_DIR:-}"
+OUTPUT_JSON="${OUTPUT_JSON:-${REPO_DIR}/seed_sweep_aggregate_${ARRAY_JOB_ID}.json}"
 
 source /u/rzhang26/venvs/cleandiffuser/activate_cleandiffuser.sh
 cd "${REPO_DIR}"
 
 PYTHON=/u/rzhang26/venvs/cleandiffuser/bin/python
-OUTPUT_JSON="${OUTPUT_JSON:-${REPO_DIR}/${SWEEP_LOG_PREFIX}_${ARRAY_JOB_ID}_aggregate.json}"
 
 echo "============================================================"
-echo "Seed sweep aggregate (from .out logs)"
+echo "Seed sweep aggregate"
 echo "============================================================"
 echo "array_job_id: ${ARRAY_JOB_ID}"
-echo "log_prefix:   ${SWEEP_LOG_PREFIX}"
+echo "log_dir:      ${LOG_DIR}"
+echo "results_dir:  ${RESULTS_DIR:-<none>}"
 echo "seed_range:   ${SEED_MIN}-${SEED_MAX}"
 echo "output_json:  ${OUTPUT_JSON}"
 echo "============================================================"
 
-"${PYTHON}" -u pipelines/aggregate_seed_sweep_from_out.py \
-  --repo-dir "${REPO_DIR}" \
-  --seed-min "${SEED_MIN}" \
-  --seed-max "${SEED_MAX}" \
-  --job-ids "${ARRAY_JOB_ID}" \
-  --only-prefix-substrings "${SWEEP_LOG_PREFIX}" \
-  --no-merge-families \
+AGG_ARGS=(
+  --repo-dir "${REPO_DIR}"
+  --seed-min "${SEED_MIN}"
+  --seed-max "${SEED_MAX}"
+  --job-ids "${ARRAY_JOB_ID}"
+  --log-dir "${LOG_DIR}"
+  --no-merge-families
   --output-json "${OUTPUT_JSON}"
+)
+if [[ -n "${RESULTS_DIR}" ]]; then
+  AGG_ARGS+=(--results-dir "${RESULTS_DIR}")
+fi
+
+"${PYTHON}" -u pipelines/aggregate_seed_sweep_from_out.py "${AGG_ARGS[@]}"
 
 echo ""
 echo ">>> Aggregate finished"

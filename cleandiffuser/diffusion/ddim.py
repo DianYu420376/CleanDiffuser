@@ -17,6 +17,7 @@ from .guidance import (
     compute_reward_gradient,
     optimization_backward_step,
     should_apply_optimization_guidance,
+    should_apply_standard_classifier_guidance,
     validate_guidance_config,
     vp_ddim_reverse_step,
 )
@@ -136,6 +137,7 @@ class DDIM(DiffusionModel):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             optimization_guidance_last_steps: int = 10,
+            optimization_guidance_alpha_sigma_scale: bool = False,
 
             preserve_history: bool = False,
     ):
@@ -181,8 +183,16 @@ class DDIM(DiffusionModel):
                 log_p, grad = compute_reward_gradient(
                     xt, t_batch, self.classifier, condition_vec_cg, self.fix_mask
                 )
+                alpha_i = alphas[i] if optimization_guidance_alpha_sigma_scale else None
+                sigma_i = sigmas[i] if optimization_guidance_alpha_sigma_scale else None
                 x_eval = compute_optimization_shift(
-                    xt, grad, optimization_guidance_scale, self.fix_mask, prior
+                    xt,
+                    grad,
+                    optimization_guidance_scale,
+                    self.fix_mask,
+                    prior,
+                    alpha=alpha_i,
+                    sigma=sigma_i,
                 )
             else:
                 log_p = None
@@ -199,12 +209,10 @@ class DDIM(DiffusionModel):
                     eps_theta = w_cfg * eps_theta[:n_samples] + (1. - w_cfg) * eps_theta[n_samples:]
                 else:
                     eps_theta = model["diffusion"](x_eval, t_batch, condition_vec_cfg)
-            # ----------------- CG (standard only) ----------------- #
-            if (
-                guidance_mode == "standard"
-                and self.classifier is not None
-                and w_cg != 0.0
-            ):
+            # ----------------- CG (standard / hybrid early steps) ----------------- #
+            if should_apply_standard_classifier_guidance(
+                guidance_mode, loop_i, optimization_guidance_last_steps, w_cg, use_opt_guidance
+            ) and self.classifier is not None:
                 _, grad = self.classifier.gradients(xt.clone(), t_batch, condition_vec_cg)
                 eps_theta = eps_theta - w_cg * sigmas[i] * grad
 

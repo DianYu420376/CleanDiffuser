@@ -68,6 +68,9 @@ def _select_action(agent, prior, obs_norm, args, obs_dim, act_dim):
         guidance_mode=args.guidance_mode,
         optimization_guidance_scale=args.optimization_guidance_scale,
         optimization_guidance_last_steps=args.optimization_guidance_last_steps,
+        optimization_guidance_alpha_sigma_scale=getattr(
+            args, "optimization_guidance_alpha_sigma_scale", False
+        ),
         temperature=args.temperature,
         ddim_eta=args.ddim_eta,
     )
@@ -239,7 +242,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", default=None)
     parser.add_argument("--log_interval", type=int, default=5)
-    parser.add_argument("--guidance_mode", default=None, choices=["standard", "optimization"])
+    parser.add_argument("--guidance_mode", default=None, choices=["standard", "optimization", "hybrid"])
     parser.add_argument("--optimization_guidance_scale", type=float, default=None)
     parser.add_argument("--w_cg", type=float, default=None)
     parser.add_argument(
@@ -268,6 +271,11 @@ def main():
         default=0.0,
         help="DDIM stochasticity in [0, 1]; 0=deterministic, 1=full DDPM noise scale.",
     )
+    parser.add_argument(
+        "--optimization-guidance-alpha-sigma-scale",
+        action="store_true",
+        help="Scale optimization shift by sigma**2/alpha at each reverse step.",
+    )
     args_cli = parser.parse_args()
 
     base = OmegaConf.load(Path(__file__).resolve().parent / args_cli.config)
@@ -294,6 +302,9 @@ def main():
         args.optimization_guidance_last_steps = 10
     args.noise_schedule = args_cli.noise_schedule
     args.ddim_eta = args_cli.ddim_eta
+    args.optimization_guidance_alpha_sigma_scale = bool(
+        args_cli.optimization_guidance_alpha_sigma_scale
+    )
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     set_episode_seed(args_cli.seed)
 
@@ -338,6 +349,7 @@ def main():
         f"guidance_mode={args.guidance_mode}, "
         f"optimization_guidance_scale={args.optimization_guidance_scale}, "
         f"optimization_guidance_last_steps={args.optimization_guidance_last_steps}, "
+        f"optimization_guidance_alpha_sigma_scale={args.optimization_guidance_alpha_sigma_scale}, "
         f"noise_schedule={args.noise_schedule}, ddim_eta={args.ddim_eta}"
     )
 
@@ -397,6 +409,7 @@ def main():
         "guidance_mode": args.guidance_mode,
         "optimization_guidance_scale": float(args.optimization_guidance_scale),
         "optimization_guidance_last_steps": int(args.optimization_guidance_last_steps),
+        "optimization_guidance_alpha_sigma_scale": bool(args.optimization_guidance_alpha_sigma_scale),
         "w_cg": float(args.task.w_cg),
         "solver": str(args.solver),
         "sampling_steps": int(args.sampling_steps),

@@ -11,6 +11,7 @@ from cleandiffuser.diffusion.guidance import (
     compute_reward_gradient,
     optimization_backward_step,
     should_apply_optimization_guidance,
+    should_apply_standard_classifier_guidance,
     validate_guidance_config,
     vp_ddim_reverse_step,
 )
@@ -167,6 +168,25 @@ def test_vp_ddim_optimization_step_uses_chain_xt():
 def test_validate_guidance_config_conflict():
     with pytest.raises(ValueError, match="incompatible with w_cg"):
         validate_guidance_config("optimization", w_cg=0.3)
+
+
+def test_validate_guidance_config_hybrid_allows_both():
+    validate_guidance_config("hybrid", w_cg=0.3, optimization_guidance_scale=0.3)
+
+
+def test_validate_guidance_config_hybrid_requires_one_guidance():
+    with pytest.raises(ValueError, match="requires at least one"):
+        validate_guidance_config("hybrid", w_cg=0.0, optimization_guidance_scale=0.0)
+
+
+def test_compute_optimization_shift_alpha_sigma_scale():
+    xt = torch.zeros((1, 2, 4))
+    grad = torch.ones((1, 2, 4))
+    alpha = torch.tensor(0.8)
+    sigma = torch.tensor(0.6)
+    out = compute_optimization_shift(xt, grad, 0.3, alpha=alpha, sigma=sigma)
+    expected_scale = 0.3 * (0.6 ** 2) / 0.8
+    assert torch.allclose(out, expected_scale * grad)
 
 
 def test_compute_pi_t_noise_prediction():
@@ -338,6 +358,18 @@ def test_should_apply_optimization_guidance_requires_positive_eta():
     )
     assert should_apply_optimization_guidance(
         "optimization", loop_i=5, last_steps=10, optimization_guidance_scale=0.1
+    )
+    assert should_apply_optimization_guidance(
+        "hybrid", loop_i=5, last_steps=10, optimization_guidance_scale=0.1
+    )
+
+
+def test_hybrid_standard_guidance_only_before_last_steps():
+    assert should_apply_standard_classifier_guidance(
+        "hybrid", loop_i=15, last_steps=10, w_cg=0.3, use_optimization_guidance=False
+    )
+    assert not should_apply_standard_classifier_guidance(
+        "hybrid", loop_i=5, last_steps=10, w_cg=0.3, use_optimization_guidance=True
     )
 
 

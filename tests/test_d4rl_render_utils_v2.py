@@ -29,7 +29,7 @@ def test_make_sim_eval_env_uses_v2_not_v4(task: str, forbidden: str):
     env, sim_name = make_sim_eval_env(task, render=False)
     try:
         assert forbidden not in sim_name
-        assert "v2" in sim_name or task.endswith("-v2")
+        assert sim_name.endswith("-v2") or task.endswith("-v2")
         obs = env.reset()
         if isinstance(obs, tuple):
             obs = obs[0]
