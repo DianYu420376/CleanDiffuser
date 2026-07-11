@@ -180,16 +180,16 @@ def _hybrid_opt_config(
 
 EP150_STD_VS_OPT_PRESETS: dict[str, dict] = {
     "hopper-medium-v2": {
-        "opt_scale": 0.09,
-        "w_cg": 0.09,
+        "opt_scale": 0.9,
+        "w_cg": 0.9,
         "opt_last": 20,
-        "hybrid_name": "hybrid_wcg0p09_opt0p09_optlast20",
+        "hybrid_name": "hybrid_wcg0p9_opt0p9_optlast20",
     },
     "halfcheetah-medium-v2": {
-        "opt_scale": 0.0005,
+        "opt_scale": 0.00003,
         "w_cg": 1.1,
         "opt_last": 20,
-        "hybrid_name": "hybrid_wcg1p1_opt0p0005_optlast20",
+        "hybrid_name": "hybrid_wcg1p1_opt0p00003_optlast20",
     },
     "walker2d-medium-v2": {
         "opt_scale": 0.05,
