@@ -12,7 +12,7 @@ set -euo pipefail
 : "${TASK:?Set TASK (walker2d-medium-v2 or halfcheetah-medium-v2)}"
 
 REPO_DIR="${REPO_DIR:-/u/rzhang26/CleanDiffuser}"
-W_CG="${W_CG:-1.1}"
+W_CG="${W_CG:-0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 OPT_GUIDANCE_LAST_STEPS="${OPT_GUIDANCE_LAST_STEPS:-20}"
 DDIM_ETA="${DDIM_ETA:-1.0}"

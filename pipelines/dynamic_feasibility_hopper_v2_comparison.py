@@ -158,7 +158,7 @@ def _monte_carlo_config() -> dict:
 def _hybrid_opt_config(
     opt_scale: float,
     *,
-    w_cg: float = 1.1,
+    w_cg: float = 0.0,
     opt_last: int = 20,
     name: str | None = None,
 ) -> dict:
@@ -181,23 +181,33 @@ def _hybrid_opt_config(
 EP150_STD_VS_OPT_PRESETS: dict[str, dict] = {
     "hopper-medium-v2": {
         "opt_scale": 0.9,
-        "w_cg": 0.9,
+        "w_cg": 0.0,
         "opt_last": 20,
-        "hybrid_name": "hybrid_wcg0p9_opt0p9_optlast20",
+        "hybrid_name": "hybrid_wcg0_opt0p9_optlast20",
     },
     "halfcheetah-medium-v2": {
         "opt_scale": 0.00003,
-        "w_cg": 1.1,
+        "w_cg": 0.0,
         "opt_last": 20,
-        "hybrid_name": "hybrid_wcg1p1_opt0p00003_optlast20",
+        "hybrid_name": "hybrid_wcg0_opt0p00003_optlast20",
     },
     "walker2d-medium-v2": {
         "opt_scale": 0.05,
-        "w_cg": 1.1,
+        "w_cg": 0.0,
         "opt_last": 20,
-        "hybrid_name": "hybrid_wcg1p1_opt0p05_optlast20",
+        "hybrid_name": "hybrid_wcg0_opt0p05_optlast20",
     },
 }
+
+
+def _hybrid_config_from_task_settings(task_settings: dict) -> dict | None:
+    best = task_settings.get("best_hybrid")
+    if not isinstance(best, dict):
+        return None
+    required = ("optimization_guidance_scale",)
+    if not all(key in best for key in required):
+        return None
+    return best
 
 
 def build_ep150_std_vs_opt_configs(
@@ -209,22 +219,42 @@ def build_ep150_std_vs_opt_configs(
     opt_last: int = 20,
     hybrid_name: str | None = None,
 ) -> list[dict]:
+    task_best = _hybrid_config_from_task_settings(task_settings)
     preset = EP150_STD_VS_OPT_PRESETS.get(task)
-    if preset is None and opt_scale is None:
+    if task_best is None and preset is None and opt_scale is None:
         raise ValueError(
             f"No ep150_std_vs_opt preset for task={task!r}; pass --opt-scale explicitly."
         )
-    resolved_opt_scale = float(opt_scale if opt_scale is not None else preset["opt_scale"])
+
+    if opt_scale is not None:
+        resolved_opt_scale = float(opt_scale)
+    elif task_best is not None:
+        resolved_opt_scale = float(task_best["optimization_guidance_scale"])
+    else:
+        resolved_opt_scale = float(preset["opt_scale"])
+
     if w_cg is not None:
         resolved_w_cg = float(w_cg)
+    elif task_best is not None:
+        resolved_w_cg = float(task_best.get("w_cg", 0.0))
     elif preset is not None and "w_cg" in preset:
         resolved_w_cg = float(preset["w_cg"])
     else:
-        resolved_w_cg = resolved_opt_scale
-    resolved_opt_last = int(preset["opt_last"] if preset is not None and opt_last == 20 else opt_last)
+        resolved_w_cg = 0.0
+
+    if task_best is not None:
+        resolved_opt_last = int(task_best.get("optimization_guidance_last_steps", opt_last))
+    elif preset is not None and opt_last == 20:
+        resolved_opt_last = int(preset["opt_last"])
+    else:
+        resolved_opt_last = int(opt_last)
+
     resolved_hybrid_name = hybrid_name
+    if resolved_hybrid_name is None and task_best is not None:
+        resolved_hybrid_name = task_best.get("name")
     if resolved_hybrid_name is None and preset is not None:
         resolved_hybrid_name = preset.get("hybrid_name")
+
     return [
         _monte_carlo_config(),
         _standard_repo_config(float(task_settings["w_cg"])),

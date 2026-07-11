@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - task: halfcheetah-medium-expert-v2
+  - task: halfcheetah-medium-v2
 
 pipeline_name: diffuser_d4rl_mujoco
 mode: train
