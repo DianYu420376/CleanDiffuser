@@ -31,17 +31,6 @@ from cleandiffuser.nn_classifier import HalfJannerUNet1d
 from cleandiffuser.nn_diffusion import JannerUNet1d
 
 from d4rl_render_utils import env_reset, env_step, make_sim_eval_env, resolve_ckpt_stem
-from dynamic_feasibility_comparison import (
-    _current_obs,
-    _episode_starts,
-    _feasibility_gaps,
-    _get_mujoco_state,
-    _load_task_settings,
-    _log,
-    _mean_std,
-    _obs_std_vector,
-    _set_mujoco_state,
-)
 from guidance_comparison_eval import (
     MONTE_CARLO_CONFIG,
     STANDARD_CONFIG,
@@ -50,6 +39,95 @@ from guidance_comparison_eval import (
 from utils import set_seed
 
 os.environ.setdefault("MUJOCO_GL", "egl")
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan"), float("nan")
+    if arr.size == 1:
+        return float(arr.mean()), 0.0
+    return float(arr.mean()), float(arr.std(ddof=1))
+
+
+def _episode_starts(terminals: np.ndarray, timeouts: np.ndarray) -> np.ndarray:
+    done = np.asarray(terminals, dtype=bool) | np.asarray(timeouts, dtype=bool)
+    ends = np.where(done)[0]
+    return np.concatenate([[0], ends[:-1] + 1]).astype(np.int64)
+
+
+def _load_task_settings(repo_dir: Path, task: str) -> dict:
+    task_yaml = repo_dir / "configs" / "diffuser" / "mujoco" / "task" / f"{task}.yaml"
+    if not task_yaml.exists():
+        raise FileNotFoundError(f"Missing task config: {task_yaml}")
+    return OmegaConf.to_container(OmegaConf.load(task_yaml), resolve=True)
+
+
+def _get_mujoco_state(env) -> tuple[np.ndarray, np.ndarray]:
+    unwrapped = env.unwrapped
+    qpos = np.array(unwrapped.data.qpos, dtype=np.float64).copy()
+    qvel = np.array(unwrapped.data.qvel, dtype=np.float64).copy()
+    return qpos, qvel
+
+
+def _set_mujoco_state(env, qpos: np.ndarray, qvel: np.ndarray) -> None:
+    env.unwrapped.set_state(
+        np.asarray(qpos, dtype=np.float64),
+        np.asarray(qvel, dtype=np.float64),
+    )
+
+
+def _current_obs(env) -> np.ndarray:
+    unwrapped = env.unwrapped
+    if hasattr(unwrapped, "_get_obs"):
+        return np.asarray(unwrapped._get_obs(), dtype=np.float32)
+    return env_reset(env)
+
+
+def _obs_std_vector(normalizer, obs_dim: int) -> np.ndarray:
+    std = np.asarray(normalizer.std, dtype=np.float64).reshape(-1)
+    if std.size < obs_dim:
+        raise ValueError(f"Normalizer std has {std.size} dims, expected {obs_dim}")
+    std = std[:obs_dim].copy()
+    std[std == 0] = 1.0
+    return std
+
+
+def _feasibility_gaps(
+    planned_obs: np.ndarray,
+    rollout_obs: np.ndarray,
+    obs_std: np.ndarray,
+    *,
+    store_per_step: bool,
+) -> dict[str, float | list[float]]:
+    delta = planned_obs - rollout_obs
+    per_step = np.linalg.norm(delta, axis=1)
+    per_step_norm = np.linalg.norm(delta / obs_std, axis=1)
+    future = per_step[1:] if per_step.size > 1 else per_step[:0]
+    future_norm = per_step_norm[1:] if per_step_norm.size > 1 else per_step_norm[:0]
+    out: dict[str, float | list[float]] = {
+        "mean_l2_all": float(per_step.mean()),
+        "std_l2_all": float(per_step.std(ddof=0)),
+        "mean_l2_future": float(future.mean()) if future.size else 0.0,
+        "std_l2_future": float(future.std(ddof=0)) if future.size else 0.0,
+        "max_l2": float(per_step.max()),
+        "final_l2": float(per_step[-1]),
+        "mean_l2_norm_all": float(per_step_norm.mean()),
+        "std_l2_norm_all": float(per_step_norm.std(ddof=0)),
+        "mean_l2_norm_future": float(future_norm.mean()) if future_norm.size else 0.0,
+        "std_l2_norm_future": float(future_norm.std(ddof=0)) if future_norm.size else 0.0,
+        "max_l2_norm": float(per_step_norm.max()),
+        "final_l2_norm": float(per_step_norm[-1]),
+    }
+    if store_per_step:
+        out["per_step_l2"] = per_step.astype(float).tolist()
+        out["per_step_l2_norm"] = per_step_norm.astype(float).tolist()
+    return out
+
 
 DEFAULT_CONFIGS = [
     MONTE_CARLO_CONFIG["name"],
@@ -255,15 +333,36 @@ def build_ep150_std_vs_opt_configs(
     if resolved_hybrid_name is None and preset is not None:
         resolved_hybrid_name = preset.get("hybrid_name")
 
-    return [
-        _monte_carlo_config(),
-        _standard_repo_config(float(task_settings["w_cg"])),
-        _hybrid_opt_config(
+    hybrid_config = None
+    if task_best is not None:
+        hybrid_config = {
+            "name": resolved_hybrid_name or task_best.get("name") or _hybrid_opt_config(
+                resolved_opt_scale, w_cg=resolved_w_cg, opt_last=resolved_opt_last
+            )["name"],
+            "guidance_mode": task_best.get("guidance_mode", "hybrid"),
+            "optimization_guidance_scale": resolved_opt_scale,
+            "w_cg": resolved_w_cg,
+            "solver": task_best.get("solver", "ddim"),
+            "temperature": float(task_best.get("temperature", 1.0)),
+            "sampling_steps": int(task_best.get("sampling_steps", 20)),
+            "optimization_guidance_last_steps": resolved_opt_last,
+            "ddim_eta": float(task_best.get("ddim_eta", 1.0)),
+            "optimization_guidance_alpha_sigma_scale": bool(
+                task_best.get("optimization_guidance_alpha_sigma_scale", True)
+            ),
+        }
+    else:
+        hybrid_config = _hybrid_opt_config(
             resolved_opt_scale,
             w_cg=resolved_w_cg,
             opt_last=resolved_opt_last,
             name=resolved_hybrid_name,
-        ),
+        )
+
+    return [
+        _monte_carlo_config(),
+        _standard_repo_config(float(task_settings["w_cg"])),
+        hybrid_config,
     ]
 
 

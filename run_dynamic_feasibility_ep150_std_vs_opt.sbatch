@@ -37,7 +37,7 @@ fi
 
 REPO_DIR="${REPO_DIR:-/u/rzhang26/CleanDiffuser}"
 JOB_ID="${SLURM_JOB_ID:-local}"
-RUN_TAG="${RUN_TAG:-${CONFIG_PRESET}_$(date +%Y%m%d_%H%M%S)_job${JOB_ID}}"
+RUN_TAG="${RUN_TAG:-${CONFIG_PRESET}_besthybrid_$(date +%Y%m%d_%H%M%S)_job${JOB_ID}}"
 OUTPUT_DIR="${REPO_DIR}/results/diffuser_d4rl_mujoco/${TASK}/dynamic_feasibility/${RUN_TAG}"
 SLURM_LOG_DIR="${REPO_DIR}/logs/slurm/dynamic_feasibility"
 
@@ -73,7 +73,7 @@ echo "task: ${TASK}"
 echo "ckpt: ${CKPT}"
 echo "sim_env: ${SIM_ENV_NAME}"
 echo "config_preset: ${CONFIG_PRESET}"
-echo "configs: monte_carlo_w_cg0 + standard_repo + hybrid opt (task preset)"
+echo "configs: monte_carlo_w_cg0 + standard_repo + best_hybrid (from task yaml)"
 echo "opt_scale override: ${OPT_SCALE:-<task preset>}"
 echo "opt_w_cg override: ${OPT_W_CG:-<task preset>}"
 echo "num_seeds: ${NUM_SEEDS} (seed_start=${SEED_START})"
