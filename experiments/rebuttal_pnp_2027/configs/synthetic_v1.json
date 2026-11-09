@@ -1,0 +1,59 @@
+{
+  "experiment": "synthetic",
+  "version": "v1",
+  "orig_root": "/u/rzhang26/CleanDiffuser/results/guidance_synthetic",
+  "paper_cache_name": "{test}_guidance_paper_s50_last50",
+  "tests": ["test_a", "test_b"],
+  "seed": 0,
+  "model": {
+    "model_dim": 64,
+    "diffusion_steps": 50,
+    "training_diffusion_steps": 50,
+    "ema_rate": 0.9999,
+    "predict_noise": false
+  },
+  "sampling": {
+    "solver": "ddim",
+    "ggdm_solver": "ddpm",
+    "sampling_steps": 50,
+    "sample_step_schedule": "uniform",
+    "optimization_guidance_last_steps": 50,
+    "temperature": 1.0,
+    "use_ema": true
+  },
+  "paper_hparams": {
+    "test_a": {"w_cg": 0.6, "opt_scale": 15.0},
+    "test_b": {"w_cg": 10.0, "opt_scale": 10.0}
+  },
+  "ggdm": {
+    "guidance_mode": "ggdm_g_loss_mean",
+    "rounds": 50,
+    "beta_coef": 0.5,
+    "interval": 0.03,
+    "obs_noise_sigma": 0.1,
+    "round_seed": 0
+  },
+  "drgd_tuned_json": "/u/rzhang26/CleanDiffuser/results/guidance_synthetic/baseline_tune_best.json",
+  "pnp": {
+    "noise_indices": [5, 13, 24],
+    "eta_over_L": [0.25, 0.5, 1.0],
+    "K_grid": [5, 10, 20],
+    "n_iters_curve": 50,
+    "val_seed_start": 10000,
+    "n_val": 20,
+    "criterion": "validation mean of ||x_K - x*||_2 in physical coordinates (minimize)",
+    "boundary_extension": {
+      "noise_index_lower": 2,
+      "noise_index_upper": 35,
+      "eta_factor": 2.0,
+      "note": "applied at most once, only on validation, only in the direction(s) where the selected (k, eta) lies on the grid boundary; K is not extended (spec)"
+    },
+    "variants": {
+      "pnp": {"input_scaling": "vp", "init": "noise", "label": "PnP-PGD"},
+      "pnp_ddim_init": {"input_scaling": "vp", "init": "ddim_unguided", "label": "PnP-PGD (DDIM init)"},
+      "pnp_noscale": {"input_scaling": "none", "init": "noise", "label": "PnP-PGD (no VP scaling)"}
+    }
+  },
+  "timing": {"warmup": 2, "repeats": 5},
+  "metrics_eta_G": 0.25
+}

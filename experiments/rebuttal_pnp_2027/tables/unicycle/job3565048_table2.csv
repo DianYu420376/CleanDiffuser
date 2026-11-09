@@ -1,0 +1,16 @@
+Setting,Algorithm,c_plan,c_rollout,e_dyn,NFE,Net bwd,Grad evals,Runtime/sample (ms),Note
+Circle,Monte Carlo,1.3815 ± 0.3015,1.4877 ± 0.2715,0.2222 ± 0.0650,20,0,0,120.38 ± 0.69,published: c_plan 1.3815 ± 0.3015; c_rollout 1.4877 ± 0.2715; e_dyn 0.2222 ± 0.0650
+Circle,PDG,0.0198 ± 0.0055,1.1694 ± 0.3203,1.6452 ± 0.2061,20,0,20,140.23 ± 0.78,published: c_plan 0.0198 ± 0.0055; c_rollout 1.1694 ± 0.3203; e_dyn 1.6452 ± 0.2061
+Circle,DCG,0.0599 ± 0.0281,0.2222 ± 0.0947,0.5031 ± 0.0861,20,0,10,134.06 ± 1.52,published: c_plan 0.0599 ± 0.0281; c_rollout 0.2222 ± 0.0947; e_dyn 0.5031 ± 0.0861
+Circle,DRGD (gamma=15),0.0473 ± 0.0216,0.1791 ± 0.0486,0.7057 ± 0.0556,40,20,20,364.78 ± 4.14,published: c_plan 0.0473 ± 0.0216; c_rollout 0.1791 ± 0.0486; e_dyn 0.7057 ± 0.0557
+Circle,PnP-PGD,0.3281 ± 0.0991,0.7354 ± 0.1988,0.7051 ± 0.1637,25,0,5,165.08 ± 1.42,init 20 NFE / 129.80 ms; iters 5 NFE + 5 grads / 35.29 ms
+Random Trajectory 1,Monte Carlo,0.5053 ± 0.3084,0.5724 ± 0.3238,0.2125 ± 0.0700,20,0,0,121.96 ± 0.57,published: c_plan 0.5053 ± 0.3084; c_rollout 0.5724 ± 0.3238; e_dyn 0.2125 ± 0.0700
+Random Trajectory 1,PDG,0.0045 ± 0.0032,0.3576 ± 0.2542,0.8317 ± 0.2941,20,0,20,140.02 ± 0.65,published: c_plan 0.0045 ± 0.0032; c_rollout 0.3576 ± 0.2542; e_dyn 0.8317 ± 0.2941
+Random Trajectory 1,DCG,0.0171 ± 0.0129,0.0744 ± 0.0459,0.3167 ± 0.0916,20,0,10,135.08 ± 0.78,published: c_plan 0.0171 ± 0.0129; c_rollout 0.0744 ± 0.0459; e_dyn 0.3167 ± 0.0916
+Random Trajectory 1,DRGD (gamma=15),0.0281 ± 0.0241,0.1260 ± 0.0301,0.4210 ± 0.0747,40,20,20,365.78 ± 3.92,published: c_plan 0.0281 ± 0.0241; c_rollout 0.1259 ± 0.0301; e_dyn 0.4209 ± 0.0747
+Random Trajectory 1,PnP-PGD,0.0782 ± 0.0539,0.5184 ± 0.3157,0.7777 ± 0.2222,25,0,5,162.02 ± 1.26,init 20 NFE / 127.13 ms; iters 5 NFE + 5 grads / 34.89 ms
+Random Trajectory 2,Monte Carlo,6.5428 ± 0.9921,6.3648 ± 0.9836,0.2125 ± 0.0700,20,0,0,121.80 ± 0.98,published: c_plan 6.5428 ± 0.9921; c_rollout 6.3648 ± 0.9836; e_dyn 0.2125 ± 0.0700
+Random Trajectory 2,PDG,0.0519 ± 0.0082,3.8825 ± 0.5179,2.8682 ± 0.2486,20,0,20,139.54 ± 0.61,published: c_plan 0.0519 ± 0.0082; c_rollout 3.8825 ± 0.5179; e_dyn 2.8682 ± 0.2486
+Random Trajectory 2,DCG,0.0211 ± 0.0102,0.1846 ± 0.0846,0.5870 ± 0.1445,20,0,10,134.50 ± 0.75,published: c_plan 0.0211 ± 0.0102; c_rollout 0.1846 ± 0.0846; e_dyn 0.5870 ± 0.1445
+Random Trajectory 2,DRGD (gamma=15),0.5724 ± 0.0792,1.2901 ± 0.4776,0.8989 ± 0.2640,40,20,20,366.75 ± 1.31,published: c_plan 0.5722 ± 0.0790; c_rollout 1.2894 ± 0.4768; e_dyn 0.8985 ± 0.2637
+Random Trajectory 2,PnP-PGD,0.8673 ± 0.1049,3.3932 ± 0.3312,1.7217 ± 0.1147,25,0,5,162.06 ± 1.23,init 20 NFE / 127.21 ms; iters 5 NFE + 5 grads / 34.85 ms

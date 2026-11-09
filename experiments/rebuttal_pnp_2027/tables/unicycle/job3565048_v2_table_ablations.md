@@ -1,0 +1,14 @@
+| Setting | Algorithm | c_plan | c_rollout | e_dyn | NFE (init) | Net bwd | Grad evals | Runtime/sample measured (ms) | Runtime alt: MC sampling + PnP iters (ms) | Note |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Circle | PnP-PGD (init: Monte Carlo) | 0.3281 ± 0.0991 | 0.7354 ± 0.1988 | 0.7051 ± 0.1637 | 25 (20) | 0 | 5 | 165.1 ± 1.4 (init 129.8 + iters 35.3) | 155.7 | spec primary variant; frozen k=2, eta=2.0/L, K=5 |
+| Circle | PnP-PGD (a) budget-matched | 0.2098 ± 0.0912 | 0.4713 ± 0.2070 | 0.5708 ± 0.1784 | 20 (10) | 0 | 10 | 134.4 ± 0.8 (init 64.9 + iters 69.6) |  |  |
+| Circle | PnP-PGD (init: x_T; abl. b) | 0.3823 ± 0.0919 | 0.9061 ± 0.1427 | 0.8262 ± 0.1123 | 10 (0) | 0 | 10 | 69.7 ± 0.5 (init 0.1 + iters 69.5) |  | ablation (b), selected on validation with the same criterion (best PnP variant on validation: 0.2995 vs 0.6198); frozen k=2, eta=2.0/L, K=10 |
+| Circle | PnP-PGD (c) no input scaling | 0.3039 ± 0.0952 | 0.6928 ± 0.1904 | 0.6969 ± 0.1632 | 25 (20) | 0 | 5 | 160.7 ± 1.4 (init 126.0 + iters 34.6) | 155.0 |  |
+| Random Trajectory 1 | PnP-PGD (init: Monte Carlo) | 0.0782 ± 0.0539 | 0.5184 ± 0.3157 | 0.7777 ± 0.2222 | 25 (20) | 0 | 5 | 162.0 ± 1.3 (init 127.1 + iters 34.9) | 156.9 | spec primary variant; frozen k=2, eta=2.0/L, K=5 |
+| Random Trajectory 1 | PnP-PGD (a) budget-matched | 0.1010 ± 0.0704 | 0.6139 ± 0.3646 | 0.8122 ± 0.2051 | 20 (10) | 0 | 10 | 133.6 ± 1.0 (init 64.3 + iters 69.3) |  |  |
+| Random Trajectory 1 | PnP-PGD (init: x_T; abl. b) | 0.0687 ± 0.0447 | 0.3833 ± 0.2527 | 0.6433 ± 0.1899 | 10 (0) | 0 | 10 | 70.0 ± 0.5 (init 0.1 + iters 69.9) |  | ablation (b), selected on validation with the same criterion (best PnP variant on validation: 0.2995 vs 0.6198); frozen k=2, eta=2.0/L, K=10 |
+| Random Trajectory 1 | PnP-PGD (c) no input scaling | 0.0655 ± 0.0494 | 0.4747 ± 0.3094 | 0.7714 ± 0.2321 | 25 (20) | 0 | 5 | 162.2 ± 1.3 (init 127.3 + iters 34.9) | 156.8 |  |
+| Random Trajectory 2 | PnP-PGD (init: Monte Carlo) | 0.8673 ± 0.1049 | 3.3932 ± 0.3312 | 1.7217 ± 0.1147 | 25 (20) | 0 | 5 | 162.1 ± 1.2 (init 127.2 + iters 34.8) | 156.6 | spec primary variant; frozen k=2, eta=2.0/L, K=5 |
+| Random Trajectory 2 | PnP-PGD (a) budget-matched | 0.7709 ± 0.1076 | 2.6218 ± 0.4743 | 1.4149 ± 0.1773 | 20 (10) | 0 | 10 | 134.3 ± 3.1 (init 64.7 + iters 69.6) |  |  |
+| Random Trajectory 2 | PnP-PGD (init: x_T; abl. b) | 0.1029 ± 0.0702 | 0.2207 ± 0.2790 | 0.4231 ± 0.2042 | 10 (0) | 0 | 10 | 70.1 ± 0.6 (init 0.1 + iters 70.0) |  | ablation (b), selected on validation with the same criterion (best PnP variant on validation: 0.2995 vs 0.6198); frozen k=2, eta=2.0/L, K=10 |
+| Random Trajectory 2 | PnP-PGD (c) no input scaling | 0.8297 ± 0.1046 | 3.3522 ± 0.3452 | 1.7389 ± 0.1226 | 25 (20) | 0 | 5 | 162.8 ± 1.3 (init 127.9 + iters 35.0) | 156.8 |  |

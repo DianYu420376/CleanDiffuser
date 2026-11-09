@@ -1,0 +1,32 @@
+\resizebox{\linewidth}{!}{
+\begin{tabular}{llccccccc}
+\toprule
+Setting & Algorithm & $c_{\mathrm{plan}}$ & $c_{\mathrm{rollout}}$ & $e_{\mathrm{dyn}}$ & NFE & Net bwd & Grad evals & Runtime (ms) \\
+\midrule
+\multirow{6}{*}{Circle} & Monte Carlo & $1.3815 \pm 0.3015$ & $1.4877 \pm 0.2715$ & $0.2222 \pm 0.0650$ & 20 & 0 & 0 & $120.4$ \\
+ & PDG & $0.0198 \pm 0.0055$ & $1.1694 \pm 0.3203$ & $1.6452 \pm 0.2061$ & 20 & 0 & 20 & $140.2$ \\
+ & DCG & $0.0599 \pm 0.0281$ & $0.2222 \pm 0.0947$ & $0.5031 \pm 0.0861$ & 20 & 0 & 10 & $134.1$ \\
+ & Landing DRGD ($\gamma=15$) & $0.0473 \pm 0.0216$ & $0.1791 \pm 0.0486$ & $0.7057 \pm 0.0557$ & 40 & 20 & 20 & $364.8$ \\
+ & PnP-PGD (init: Monte Carlo) & $0.3281 \pm 0.0991$ & $0.7354 \pm 0.1988$ & $0.7051 \pm 0.1637$ & 5+20 & 0 & 5 & $165.1$ \\
+ & PnP-PGD (init: $x_T$)$^{\ddagger}$ & $0.3823 \pm 0.0919$ & $0.9061 \pm 0.1427$ & $0.8262 \pm 0.1123$ & 10 & 0 & 10 & $69.7$ \\
+\midrule
+\multirow{6}{*}{Random Trajectory 1} & Monte Carlo & $0.5053 \pm 0.3084$ & $0.5724 \pm 0.3238$ & $0.2125 \pm 0.0700$ & 20 & 0 & 0 & $122.0$ \\
+ & PDG & $0.0045 \pm 0.0032$ & $0.3576 \pm 0.2542$ & $0.8317 \pm 0.2941$ & 20 & 0 & 20 & $140.0$ \\
+ & DCG & $0.0171 \pm 0.0129$ & $0.0744 \pm 0.0459$ & $0.3167 \pm 0.0916$ & 20 & 0 & 10 & $135.1$ \\
+ & Landing DRGD ($\gamma=15$) & $0.0281 \pm 0.0241$ & $0.1259 \pm 0.0301$ & $0.4209 \pm 0.0747$ & 40 & 20 & 20 & $365.8$ \\
+ & PnP-PGD (init: Monte Carlo) & $0.0782 \pm 0.0539$ & $0.5184 \pm 0.3157$ & $0.7777 \pm 0.2222$ & 5+20 & 0 & 5 & $162.0$ \\
+ & PnP-PGD (init: $x_T$)$^{\ddagger}$ & $0.0687 \pm 0.0447$ & $0.3833 \pm 0.2527$ & $0.6433 \pm 0.1899$ & 10 & 0 & 10 & $70.0$ \\
+\midrule
+\multirow{6}{*}{Random Trajectory 2} & Monte Carlo & $6.5428 \pm 0.9921$ & $6.3648 \pm 0.9836$ & $0.2125 \pm 0.0700$ & 20 & 0 & 0 & $121.8$ \\
+ & PDG & $0.0519 \pm 0.0082$ & $3.8825 \pm 0.5179$ & $2.8682 \pm 0.2486$ & 20 & 0 & 20 & $139.5$ \\
+ & DCG & $0.0211 \pm 0.0102$ & $0.1846 \pm 0.0846$ & $0.5870 \pm 0.1445$ & 20 & 0 & 10 & $134.5$ \\
+ & Landing DRGD ($\gamma=15$) & $0.5722 \pm 0.0790$ & $1.2894 \pm 0.4768$ & $0.8985 \pm 0.2637$ & 40 & 20 & 20 & $366.7$ \\
+ & PnP-PGD (init: Monte Carlo) & $0.8673 \pm 0.1049$ & $3.3932 \pm 0.3312$ & $1.7217 \pm 0.1147$ & 5+20 & 0 & 5 & $162.1$ \\
+ & PnP-PGD (init: $x_T$)$^{\ddagger}$ & $0.1029 \pm 0.0702$ & $0.2207 \pm 0.2790$ & $0.4231 \pm 0.2042$ & 10 & 0 & 10 & $70.1$ \\
+\bottomrule
+\end{tabular}
+}
+% Notes (put in caption/footnote):
+% Monte Carlo, PDG, DCG: our re-run is bit-identical per candidate to the published runs. DRGD: values are the published ones; our re-run differs in the 4th digit because DRGD's backward/JVP path is non-deterministic on CUDA (two runs in the same job differ by up to 4.2e-3 in planned obs).
+% PnP-PGD NFE = K iterations + init (unguided DDIM-20 plan); 0 network backward passes. Runtime: ms per sample, n=1 sequential, one GH200 job, 3 warm-up candidates, synchronized, excluding rollout/metrics. PnP-PGD (init: Monte Carlo) runtime = measured init + iterations; its init (the identical computation to Monte Carlo) was timed 5.2-9.4 ms slower than the Monte Carlo row in that job, so Monte Carlo sampling + PnP iterations gives 155.7 / 156.9 / 156.6 ms instead of 165.1 / 162.0 / 162.1 ms; a separate timing-diagnostic job (gh143) reproduced only a 1-4 ms loop-context gap, cause unresolved.
+% ddagger: ablation (b), PnP-PGD started from the Gaussian x_T (no unguided init), selected on validation with the same criterion and grid; best PnP variant on validation.

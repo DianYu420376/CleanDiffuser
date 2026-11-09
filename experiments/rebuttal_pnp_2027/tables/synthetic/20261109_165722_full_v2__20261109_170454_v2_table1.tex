@@ -1,0 +1,40 @@
+% Test A (box in 2-D subspace)
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Method & $f$ & $f-f^*$ & viol. & $\mathrm{dist}_\mathcal{K}$ & $\|x-x^*\|$ & $\|G\|$ & NFE & grad & bwd & ms/100 \\
+\midrule
+DCG & $5.236\pm0.012$ & 0.736 & 5.4e-02 & 5.4e-02 & 0.176 & 0.705 & 50 & 50 & 0 & 138 \\
+PDG & $6.439\pm1.746$ & 1.939 & 2.4e-01 & 2.4e-01 & 0.538 & 2.153 & 50 & 50 & 0 & 136 \\
+GGDM & $12.905\pm1.608$ & 8.405 & 2.7e-02 & 2.7e-02 & 1.530 & 6.003 & 2550 & 2500.5$^\dagger$ & 0 & 7752 \\
+DRGD & $6.658\pm0.000$ & 2.158 & 5.5e-03 & 5.5e-03 & 0.459 & 1.837 & 100 & 50 & 50 & 327 \\
+PnP-PGD (k=13, $\bar\sigma$=0.455, $\eta$=0.5/L, K=20) & $4.812\pm0.000$ & 0.312 & 1.0e-02 & 1.0e-02 & 0.074 & 0.298 & 20 & 20 & 0 & 51 \\
+PnP-PGD (k=13, $\bar\sigma$=0.455, $\eta$=0.5/L, K=50) & $4.812\pm0.000$ & 0.312 & 1.0e-02 & 1.0e-02 & 0.074 & 0.298 & 50 & 50 & 0 & 127 \\
+PnP-PGD (DDIM init) (k=13, $\bar\sigma$=0.455, $\eta$=0.5/L, K=20) & $4.812\pm0.000$ & 0.312 & 1.0e-02 & 1.0e-02 & 0.074 & 0.298 & 70 & 20 & 0 & 164 \\
+PnP-PGD (DDIM init) (k=13, $\bar\sigma$=0.455, $\eta$=0.5/L, K=50) & $4.812\pm0.000$ & 0.312 & 1.0e-02 & 1.0e-02 & 0.074 & 0.298 & 100 & 50 & 0 & 240 \\
+PnP-PGD (no VP scaling) (k=5, $\bar\sigma$=0.172, $\eta$=0.125/L, K=20) & $4.715\pm0.000$ & 0.215 & 8.8e-03 & 8.8e-03 & 0.051 & 0.204 & 20 & 20 & 0 & 51 \\
+PnP-PGD (no VP scaling) (k=5, $\bar\sigma$=0.172, $\eta$=0.125/L, K=50) & $4.715\pm0.000$ & 0.215 & 8.8e-03 & 8.8e-03 & 0.051 & 0.204 & 50 & 50 & 0 & 126 \\
+Unguided DDIM & $13.645\pm4.237$ & 9.145 & 4.7e-03 & 4.7e-03 & 1.599 & 6.131 & 50 & 0 & 0 & 109 \\
+\bottomrule
+\end{tabular}
+\par\smallskip{\footnotesize $^\dagger$GGDM grad/path counts every objective-gradient call executed by the existing implementation: $R\cdot S=2500$ per-step calls (used only to log $\log p$, not in the update) plus $R=50$ anchor gradients at the particle mean (one batch-of-1 evaluation shared by 100 particles, $0.5$/path). Algorithmically required: 50 shared anchor gradients. Mean $\pm$ std over 100 test paths (ddof $=0$); ms/100 = wall-clock for one call on the batch of 100.}
+
+% Test B (ellipsoid in 5-D subspace)
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Method & $f$ & $f-f^*$ & viol. & $\mathrm{dist}_\mathcal{K}$ & $\|x-x^*\|$ & $\|G\|$ & NFE & grad & bwd & ms/100 \\
+\midrule
+DCG & $8.087\pm0.009$ & 0.378 & 7.2e-03 & 7.2e-03 & 0.069 & 0.275 & 50 & 50 & 0 & 137 \\
+PDG & $2.785\pm0.002$ & -4.924 & 1.2e+00 & 1.1e+00 & 1.146 & 4.580 & 50 & 50 & 0 & 134 \\
+GGDM & $12.915\pm0.446$ & 5.206 & 2.8e-03 & 2.8e-03 & 0.901 & 3.430 & 2550 & 2500.5$^\dagger$ & 0 & 7725 \\
+DRGD & $10.196\pm0.000$ & 2.487 & 7.5e-04 & 7.5e-04 & 0.425 & 1.691 & 100 & 50 & 50 & 326 \\
+PnP-PGD (k=5, $\bar\sigma$=0.174, $\eta$=0.25/L, K=20) & $7.684\pm0.000$ & -0.024 & 7.1e-03 & 6.7e-03 & 0.027 & 0.096 & 20 & 20 & 0 & 51 \\
+PnP-PGD (k=5, $\bar\sigma$=0.174, $\eta$=0.25/L, K=50) & $7.684\pm0.000$ & -0.025 & 7.2e-03 & 6.8e-03 & 0.027 & 0.097 & 50 & 50 & 0 & 126 \\
+PnP-PGD (DDIM init) (k=5, $\bar\sigma$=0.174, $\eta$=0.25/L, K=20) & $7.684\pm0.000$ & -0.025 & 7.1e-03 & 6.8e-03 & 0.027 & 0.096 & 70 & 20 & 0 & 164 \\
+PnP-PGD (DDIM init) (k=5, $\bar\sigma$=0.174, $\eta$=0.25/L, K=50) & $7.684\pm0.000$ & -0.025 & 7.2e-03 & 6.8e-03 & 0.027 & 0.097 & 100 & 50 & 0 & 240 \\
+PnP-PGD (no VP scaling) (k=13, $\bar\sigma$=0.414, $\eta$=1/L, K=5) & $7.841\pm0.000$ & 0.132 & 5.7e-03 & 5.7e-03 & 0.027 & 0.105 & 5 & 5 & 0 & 13 \\
+PnP-PGD (no VP scaling) (k=13, $\bar\sigma$=0.414, $\eta$=1/L, K=50) & $7.841\pm0.000$ & 0.132 & 5.7e-03 & 5.7e-03 & 0.027 & 0.105 & 50 & 50 & 0 & 127 \\
+Unguided DDIM & $13.382\pm1.688$ & 5.673 & 2.6e-03 & 2.6e-03 & 0.976 & 3.685 & 50 & 0 & 0 & 108 \\
+\bottomrule
+\end{tabular}
+\par\smallskip{\footnotesize $^\dagger$GGDM grad/path counts every objective-gradient call executed by the existing implementation: $R\cdot S=2500$ per-step calls (used only to log $\log p$, not in the update) plus $R=50$ anchor gradients at the particle mean (one batch-of-1 evaluation shared by 100 particles, $0.5$/path). Algorithmically required: 50 shared anchor gradients. Mean $\pm$ std over 100 test paths (ddof $=0$); ms/100 = wall-clock for one call on the batch of 100.}
+

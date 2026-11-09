@@ -1,0 +1,55 @@
+{
+  "experiment": "inverse",
+  "description": "Sparse trajectory reconstruction (noise-free linear inverse problem) with the existing pretrained unicycle diffusion model. Protocol fixed before any validation/test run.",
+  "checkpoint": "/u/rzhang26/CleanDiffuser/results/diffuser_unicycle/Unicycle-v0/full64_6k/diffusion_ckpt_latest.pt",
+  "training_hdf5": "/u/rzhang26/CleanDiffuser/results/unicycle_offline/full64_6k/unicycle_offline.hdf5",
+  "model": {"model_dim": 32, "dim_mult": [1, 2, 2], "ema_rate": 0.9999, "predict_noise": false, "use_ema": true, "horizon": 64, "obs_dim": 4, "act_dim": 2},
+  "data": {
+    "collect_settings_from": "/u/rzhang26/CleanDiffuser_rebuttal_pnp/run_collect_unicycle_full64.sbatch (require_full_horizon, horizon 64, dt 0.1, x/y lim [-8,8], v [0,2], w [-1.5,1.5])",
+    "test_seed": 2027, "n_test": 100,
+    "val_seed": 2028, "n_val": 20
+  },
+  "observations": {
+    "n_observed_timesteps": 16,
+    "candidate_timesteps": "1..63",
+    "observed_dims": [0, 1],
+    "mask_seed_test": 12027,
+    "mask_seed_val": 12028,
+    "mask_rule": "rng = np.random.default_rng(mask_seed); for j in range(n): S_j = sorted(rng.choice(np.arange(1, 64), 16, replace=False))"
+  },
+  "xT_seeds": {
+    "rule": "x_T for trajectory j: torch.manual_seed(base + j); torch.randn((1,64,6), device='cuda:0'); shared by all methods",
+    "base_test": 20270000,
+    "base_val": 20280000
+  },
+  "objective": "f(x) = 0.5 * ||A x - y||^2 in normalized coordinates, y = A x*_norm, grad f = A^T(Ax - y), L = 1; reward R = -f",
+  "methods": {
+    "unguided": {"diffusion_steps": 20, "training_diffusion_steps": 20, "sampling_steps": 20, "solver": "ddim", "guidance_mode": "standard", "w_cg": 0.0},
+    "pdg": {"diffusion_steps": 20, "training_diffusion_steps": 20, "sampling_steps": 20, "solver": "ddim", "guidance_mode": "standard",
+            "grid": {"w_cg": [0.3, 1.0, 3.0, 10.0, 30.0]}, "extension": {"w_cg": {"low": 0.1, "high": 100.0}}},
+    "dcg": {"diffusion_steps": 100, "training_diffusion_steps": 20, "sampling_steps": 20, "optimization_guidance_last_steps": 10, "solver": "ddim", "guidance_mode": "optimization", "w_cg": 0.0,
+            "grid": {"eta": [1.0, 3.0, 10.0, 30.0, 100.0]}, "extension": {"eta": {"low": 0.3, "high": 300.0}}},
+    "pnp_pgd": {"init": "unguided DDIM-20 sample of the same x_T (20 NFE counted)", "input_scaling": "vp",
+                "grid": {"noise_index": [2, 5, 9], "eta": [0.25, 0.5, 1.0], "K": [5, 10, 20]},
+                "extension": {"noise_index": {"low": 1, "high": 14}, "eta": {"low": 0.125, "high": 1.5}},
+                "extension_note": "eta upper extension 1.5 (not 2.0) to stay strictly inside the gradient-step stability range eta < 2/L; K is a compute budget and is not extended (reported if K=20 is selected)"},
+    "pnp_pgd_ddim10_K10": {"init": "unguided DDIM-10 sample (agent with diffusion_steps 20, sampling_steps 10) of the same x_T (10 NFE counted)", "input_scaling": "vp", "K": 10,
+                "grid": {"noise_index": [2, 5, 9], "eta": [0.25, 0.5, 1.0]},
+                "extension": {"noise_index": {"low": 1, "high": 14}, "eta": {"low": 0.125, "high": 1.5}}}
+  },
+  "selection": {
+    "criterion": "minimize validation mean (over the 20 validation trajectories) of per-trajectory unobserved-xy MSE in physical units (mean over the 47 unobserved timesteps t in {1..63} \\ S and the x,y dims)",
+    "tie_break": "lower NFE, then lower gradient count, then grid order",
+    "boundary_rule": "if a selected eta / w_cg / noise index lies on the boundary of its grid, add the pre-registered extension point in that direction ONCE (crossed with the full grid of the other hyper-parameters), re-select over the extended grid, never extend again"
+  },
+  "metrics": {
+    "unobs_xy_mse": "physical m^2, mean over unobserved timesteps (t in 1..63 not in S) and dims x,y (PRIMARY)",
+    "unobs_obs4_mse": "physical, mean over unobserved timesteps and all 4 obs dims (x, y, cos th, sin th)",
+    "action_mse": "mean over t=0..63 and (v, w) of (clip(a_hat) - a*)^2",
+    "obs_xy_rmse": "physical m, sqrt of mean over the 16 observed timesteps x 2 dims",
+    "f_norm": "0.5 * ||A x_hat - y||^2 in normalized coordinates",
+    "e_dyn": "unicycle_eval._feasibility_gaps(planned_obs, _open_loop_rollout_obs(env(terminate_on_oob=False), true o_0, clip(planned actions), 64))['mean_l2_future'] (mean over t=1..63 of physical 4-dim L2)"
+  },
+  "figures": {"representative_rule": "test trajectories at the 25th/50th/75th percentile (nearest rank on the sorted list, index round(q*(n-1))) of the UNGUIDED unobserved-xy MSE; supplementary figure: fixed test indices 0..3"},
+  "timing": {"batching": "batch size 1 per trajectory (all 100 test trajectories, each timed individually with torch.cuda.synchronize before/after; model loading and the CPU e_dyn rollout excluded); 3 warm-up calls per method before timing; secondary: batched throughput (all 100 in one batch) / 100", "same_job": true}
+}
