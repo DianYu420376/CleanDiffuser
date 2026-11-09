@@ -14,7 +14,9 @@ class RuntimeRewardClassifier:
     ``x`` is the full trajectory tensor ``(batch, horizon, dim)`` in normalized space.
 
     Unlike trained log-probability classifiers, this exposes the raw reward gradient
-    ``∇_x R(x)`` (not ``∇_x log R(x)``) for guidance.
+    ``∇_x R(x)`` (not ``∇_x log R(x)``) for guidance. ``DiscreteDiffusionSDE``
+    applies ``w * ∇R`` directly on the x0 prediction head when this flag is set
+    (legacy PCG baseline for synthetic runtime rewards).
     """
 
     uses_reward_gradient = True

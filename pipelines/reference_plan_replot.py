@@ -28,11 +28,13 @@ PLOT_STYLE_EMPHASIS = {
     "start_size": 660.0,
 }
 EMPHASIS_TRAJECTORIES = {"circle", "random_smooth_1", "random_smooth_7"}
-EMPHASIS_CONFIGS = {"standard_w_cg30", "optimization_scale_30"}
+EMPHASIS_CONFIGS = {"standard_w_cg30", "optimization_scale_30", "drgd_gamma15"}
 
 
 def resolve_plot_style(trajectory: str, config: str) -> dict:
-    if trajectory in EMPHASIS_TRAJECTORIES and config in EMPHASIS_CONFIGS:
+    if trajectory in EMPHASIS_TRAJECTORIES and (
+        config in EMPHASIS_CONFIGS or config.startswith("drgd_gamma")
+    ):
         return PLOT_STYLE_EMPHASIS
     return PLOT_STYLE_DEFAULT
 
@@ -203,12 +205,12 @@ def replot_run(run_dir: Path, top_k: int, *, save_pdf: bool) -> int:
     plot_dir = run_dir / "reference_plan" / "plots"
     cached = load_candidates(traj_dir)
     trajectory = cached["meta"]["reference_name"]
-    config = cached["meta"]["config_name"]
-    style = resolve_plot_style(trajectory, config)
+    config_label = cached["meta"]["config_name"]
+    style = resolve_plot_style(trajectory, run_dir.name)
     ranked = sorted(cached["candidates"], key=lambda c: c["plan_reward"], reverse=True)
     top_plots = []
     for rank, cand in enumerate(ranked[: max(1, top_k)], start=1):
-        plot_path = plot_dir / f"plan_{trajectory}_{config}_rank{rank:02d}_cand{cand['candidate_idx']}.png"
+        plot_path = plot_dir / f"plan_{trajectory}_{config_label}_rank{rank:02d}_cand{cand['candidate_idx']}.png"
         plot_plan_vs_rollout(
             cand["planned_xy"],
             cand["rollout_xy"],

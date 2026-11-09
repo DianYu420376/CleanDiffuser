@@ -416,13 +416,14 @@ def _sample_plan(
     config: dict,
     obs_dim: int,
     act_dim: int,
+    *,
+    seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     obs_norm = torch.tensor(normalizer.normalize(init_obs[None, :]), device=args.device, dtype=torch.float32)
     prior.zero_()
     prior[:, 0, :obs_dim] = obs_norm
 
-    traj, _ = agent.sample(
-        prior,
+    sample_kwargs = dict(
         solver=args.solver,
         n_samples=1,
         sample_steps=args.sampling_steps,
@@ -434,6 +435,32 @@ def _sample_plan(
         optimization_guidance_last_steps=args.optimization_guidance_last_steps,
         temperature=args.temperature,
     )
+
+    mode = config["guidance_mode"]
+    if mode == "drgd":
+        sample_kwargs["solver"] = getattr(args, "solver", "ddim")
+        sample_kwargs["drgd_steps"] = getattr(args, "drgd_steps", args.sampling_steps)
+        sample_kwargs["drgd_gamma"] = getattr(args, "drgd_gamma", 10.0)
+        sample_kwargs["drgd_noise_index"] = getattr(args, "drgd_noise_index", -1)
+        gen = torch.Generator(device=args.device)
+        gen.manual_seed(args.seed if seed is None else seed)
+        initial_xt = torch.randn_like(prior, generator=gen) * args.temperature
+        initial_xt = initial_xt * (1.0 - agent.fix_mask) + prior * agent.fix_mask
+        sample_kwargs["initial_xt"] = initial_xt
+    elif mode == "ggdm_g_loss":
+        sample_kwargs["solver"] = getattr(args, "ggdm_solver", "ddpm")
+        sample_kwargs["ggdm_interval"] = getattr(args, "ggdm_interval", 0.05)
+        sample_kwargs["ggdm_obs_noise_sigma"] = getattr(args, "ggdm_obs_noise_sigma", 0.1)
+        sample_kwargs["ggdm_beta_coef"] = getattr(args, "ggdm_beta_coef", 0.5)
+        sample_kwargs["ggdm_rounds"] = getattr(args, "ggdm_rounds", 10)
+        sample_kwargs["ggdm_round_seed"] = args.seed if seed is None else seed
+        gen = torch.Generator(device=args.device)
+        gen.manual_seed(args.seed if seed is None else seed)
+        initial_xt = torch.randn_like(prior, generator=gen) * args.temperature
+        initial_xt = initial_xt * (1.0 - agent.fix_mask) + prior * agent.fix_mask
+        sample_kwargs["initial_xt"] = initial_xt
+
+    traj, _ = agent.sample(prior, **sample_kwargs)
 
     plan = traj[0].detach().cpu().numpy()
     planned_obs = normalizer.unnormalize(plan[:, :obs_dim])
@@ -1421,8 +1448,10 @@ def run_plan_eval(
 
     validate_guidance_config(cfg["guidance_mode"], cfg["w_cg"], cfg["optimization_guidance_scale"])
     agent = _load_agent(args, save_path, obs_dim, act_dim, horizon, classifier=None)
-    unguided = cfg["w_cg"] == 0.0 and cfg["optimization_guidance_scale"] == 0.0
-    if unguided:
+    uses_classifier = cfg["guidance_mode"] in ("standard", "optimization", "ggdm_g_loss", "drgd") and (
+        cfg["w_cg"] != 0.0 or cfg["optimization_guidance_scale"] != 0.0 or cfg["guidance_mode"] in ("ggdm_g_loss", "drgd")
+    )
+    if not uses_classifier:
         agent.classifier = None
         _log(f"[{task_label}] unguided sampling; prior pins t=0 obs to init state")
     else:
@@ -1432,7 +1461,7 @@ def run_plan_eval(
     for i in range(args.heart_plan_candidates):
         set_seed(args.seed + i)
         planned_obs, planned_act, plan_norm = _sample_plan(
-            agent, normalizer, init_obs, prior, args, cfg, obs_dim, act_dim
+            agent, normalizer, init_obs, prior, args, cfg, obs_dim, act_dim, seed=args.seed + i
         )
         rollout_obs = _open_loop_rollout_obs(env, init_obs, planned_act, horizon)
         plan_reward = _tracking_reward_score(plan_norm, reward_fn, args.device)
@@ -2067,6 +2096,14 @@ def main() -> None:
         help="Initial noise scale for x_T. Use 1.0 with DDIM; values <1 shrink trajectories.",
     )
     parser.add_argument("--optimization-guidance-last-steps", type=int, default=10)
+    parser.add_argument("--drgd-steps", type=int, default=50)
+    parser.add_argument("--drgd-gamma", type=float, default=10.0)
+    parser.add_argument("--drgd-noise-index", type=int, default=-1)
+    parser.add_argument("--ggdm-solver", default="ddpm")
+    parser.add_argument("--ggdm-interval", type=float, default=0.05)
+    parser.add_argument("--ggdm-obs-noise-sigma", type=float, default=0.1)
+    parser.add_argument("--ggdm-beta-coef", type=float, default=0.5)
+    parser.add_argument("--ggdm-rounds", type=int, default=10)
     args = parser.parse_args()
 
     if args.device.startswith("cuda") and not torch.cuda.is_available():

@@ -22,6 +22,13 @@ from .guidance import (
     validate_guidance_config,
     vp_ddim_reverse_step,
 )
+from .baseline_guidance import (
+    apply_ggdm_g_loss_prediction,
+    compute_ggdm_anchor,
+    compute_ggdm_anchor_mean,
+    run_drgd_refinement,
+    should_apply_ggdm_guidance,
+)
 
 SUPPORTED_SOLVERS = [
     "ddpm", "ddim",
@@ -176,7 +183,9 @@ class BaseDiffusionSDE(DiffusionModel):
             return pred, None
         else:
             log_p, grad = self.classifier.gradients(xt.clone(), t, condition)
-            if self.predict_noise:
+            if getattr(self.classifier, "uses_reward_gradient", False):
+                pred = pred + w * grad
+            elif self.predict_noise:
                 pred = pred - w * sigma * grad
             else:
                 pred = pred + w * ((sigma ** 2) / alpha) * grad
@@ -216,13 +225,14 @@ class BaseDiffusionSDE(DiffusionModel):
 
         return bar_pred
 
-    def clip_prediction(self, pred, xt, alpha, sigma):
+    def clip_prediction(self, pred, xt, alpha, sigma, *, as_noise: bool = False):
         """
         Clip the prediction at each sampling step to stablize the generation.
         (xt - alpha * x_max) / sigma <= eps <= (xt - alpha * x_min) / sigma
                                x_min <= x0  <= x_max
         """
-        if self.predict_noise:
+        treat_as_noise = self.predict_noise or as_noise
+        if treat_as_noise:
             if self.clip_pred:
                 upper_bound = (xt - alpha * self.x_min) / sigma if self.x_min is not None else None
                 lower_bound = (xt - alpha * self.x_max) / sigma if self.x_max is not None else None
@@ -243,7 +253,14 @@ class BaseDiffusionSDE(DiffusionModel):
             guidance_mode: str = "standard",
             optimization_guidance_scale: float = 0.0,
             apply_optimization_guidance: bool = True,
-            optimization_guidance_alpha_sigma_scale: bool = False):
+            optimization_guidance_alpha_sigma_scale: bool = False,
+            ggdm_interval: float = 0.0,
+            ggdm_obs_noise_sigma: float = 0.1,
+            ggdm_beta_coef: float = 1.0,
+            ggdm_beta_constant: Optional[float] = None,
+            ggdm_last_steps: int = 0,
+            ggdm_target_y: Optional[torch.Tensor] = None,
+            ggdm_g_anchor: Optional[torch.Tensor] = None):
         """
         One-step epsilon/x0 prediction with guidance.
 
@@ -256,6 +273,30 @@ class BaseDiffusionSDE(DiffusionModel):
         back to standard classifier guidance (if w_cg > 0) for that step.
         """
         validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
+
+        if should_apply_ggdm_guidance(guidance_mode, ggdm_interval):
+            if self.classifier is None:
+                pred = self.classifier_free_guidance(
+                    xt, t, model, condition_cfg, w_cfg, None, None, requires_grad)
+                return pred, None, xt
+            pred, logp = apply_ggdm_g_loss_prediction(
+                xt,
+                t,
+                alpha,
+                sigma,
+                model,
+                self.classifier,
+                predict_noise=self.predict_noise,
+                ggdm_interval=ggdm_interval,
+                obs_noise_sigma=ggdm_obs_noise_sigma,
+                beta_coef=ggdm_beta_coef,
+                beta_constant=ggdm_beta_constant,
+                condition_cg=condition_cg,
+                fix_mask=self.fix_mask,
+                ggdm_target_y=ggdm_target_y,
+                ggdm_g_anchor=ggdm_g_anchor,
+            )
+            return pred, logp, xt
 
         if (
             apply_optimization_guidance
@@ -453,6 +494,189 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
 
     # ==================== Sampling: Solving SDE/ODE ======================
 
+    def _sample_ggdm_algorithm1(
+            self,
+            prior: torch.Tensor,
+            *,
+            guided_rounds: int,
+            initial_xt: Optional[torch.Tensor],
+            ggdm_round_seed: Optional[int],
+            preserve_history: bool,
+            sample_kwargs: dict,
+    ):
+        """GGDM Algorithm 1 (Guo et al.; yukang123/GGDMOptim main.optimize).
+
+        Phase 0: unguided reverse diffusion landing -> query z.
+        Phases 1..K: at each query z, recompute reward gradient g and target
+        y = delta + g^T z, then run a full G_loss guided reverse pass from
+        fresh noise. Inner denoising uses fixed (g, y) from the current query.
+        """
+        temperature = sample_kwargs.get("temperature", 1.0)
+        n_samples = sample_kwargs.get("n_samples", 1)
+        inner_kwargs = {
+            k: v for k, v in sample_kwargs.items()
+            if k not in (
+                "guidance_mode", "initial_xt", "preserve_history", "requires_grad",
+                "ggdm_query_xt", "w_cg", "optimization_guidance_scale",
+                "ggdm_rounds", "ggdm_round_seed",
+                "ggdm_interval", "ggdm_obs_noise_sigma", "ggdm_beta_coef", "ggdm_beta_constant",
+            )
+        }
+        inner_kwargs["solver"] = "ddpm"
+        guidance_mode = sample_kwargs.get("guidance_mode", "ggdm_g_loss")
+        ggdm_fields = {
+            "ggdm_interval": sample_kwargs.get("ggdm_interval", 0.05),
+            "ggdm_obs_noise_sigma": sample_kwargs.get("ggdm_obs_noise_sigma", 0.1),
+            "ggdm_beta_coef": sample_kwargs.get("ggdm_beta_coef", 1.0),
+            "ggdm_beta_constant": sample_kwargs.get("ggdm_beta_constant"),
+        }
+
+        xt, _ = self.sample(
+            prior,
+            guidance_mode="standard",
+            w_cg=0.0,
+            optimization_guidance_scale=0.0,
+            initial_xt=initial_xt,
+            preserve_history=False,
+            requires_grad=False,
+            ggdm_interval=0.0,
+            ggdm_rounds=0,
+            **inner_kwargs,
+        )
+        query = xt.detach()
+        final_log = None
+
+        for round_idx in range(guided_rounds):
+            if ggdm_round_seed is not None:
+                gen = torch.Generator(device=self.device)
+                gen.manual_seed(int(ggdm_round_seed) + 1000 * (round_idx + 1))
+                fresh_xt = torch.randn(
+                    (n_samples, *prior.shape[1:]), device=self.device, generator=gen
+                ) * temperature
+            else:
+                fresh_xt = torch.randn((n_samples, *prior.shape[1:]), device=self.device) * temperature
+            fresh_xt = fresh_xt * (1.0 - self.fix_mask) + prior.to(self.device) * self.fix_mask
+
+            is_last = round_idx == guided_rounds - 1
+            xt, log = self.sample(
+                prior,
+                guidance_mode=guidance_mode,
+                w_cg=0.0,
+                optimization_guidance_scale=0.0,
+                initial_xt=fresh_xt,
+                ggdm_query_xt=query,
+                preserve_history=preserve_history and is_last,
+                requires_grad=True,
+                ggdm_rounds=0,
+                **inner_kwargs,
+                **ggdm_fields,
+            )
+            query = xt.detach()
+            if is_last:
+                final_log = log
+
+        return xt, final_log if final_log is not None else log
+
+    def _sample_drgd_only(
+            self,
+            prior: torch.Tensor,
+            *,
+            initial_xt: Optional[torch.Tensor],
+            n_samples: int,
+            sample_steps: int,
+            sample_step_schedule: Union[str, Callable],
+            use_ema: bool,
+            temperature: float,
+            drgd_steps: int,
+            drgd_gamma: float,
+            drgd_noise_index: int,
+            condition_cg=None,
+            preserve_history: bool,
+    ):
+        """DRGD-only baseline: skip reverse diffusion, refine initial noise for K steps."""
+        model = self.model if not use_ema else self.model_ema
+        prior = prior.to(self.device)
+        if initial_xt is not None:
+            xt = initial_xt.to(self.device)
+        else:
+            xt = torch.randn((n_samples, *prior.shape[1:]), device=self.device) * temperature
+        xt = xt * (1.0 - self.fix_mask) + prior * self.fix_mask
+
+        diffusion_steps = self.diffusion_steps
+        if isinstance(sample_step_schedule, str):
+            if sample_step_schedule in SUPPORTED_SAMPLING_STEP_SCHEDULE.keys():
+                schedule = SUPPORTED_SAMPLING_STEP_SCHEDULE[sample_step_schedule](
+                    diffusion_steps, sample_steps
+                )
+            else:
+                raise ValueError(f"Sampling step schedule {sample_step_schedule} is not supported.")
+        elif callable(sample_step_schedule):
+            schedule = sample_step_schedule(diffusion_steps, sample_steps)
+        else:
+            raise ValueError("sample_step_schedule must be a callable or a string")
+
+        def _model_timestep(schedule_value: Union[int, float]) -> float:
+            if self.training_diffusion_steps == self.diffusion_steps:
+                return float(schedule_value)
+            return float(schedule_value) * (self.training_diffusion_steps - 1) / max(
+                self.diffusion_steps - 1, 1
+            )
+
+        n_drgd = drgd_steps if drgd_steps > 0 else sample_steps
+        if drgd_noise_index < 0:
+            drgd_idx = len(schedule) - 1
+        else:
+            drgd_idx = int(max(0, min(drgd_noise_index, len(schedule) - 1)))
+
+        alphas = self.alpha[schedule]
+        sigmas = self.sigma[schedule]
+        drgd_alpha = alphas[drgd_idx]
+        drgd_sigma = sigmas[drgd_idx]
+        drgd_t = torch.full(
+            (n_samples,),
+            _model_timestep(schedule[drgd_idx]),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        from cleandiffuser.diffusion.tweedie_adapter import TweedieAdapter
+
+        adapter = TweedieAdapter(
+            model,
+            predict_noise=self.predict_noise,
+            fix_mask=self.fix_mask,
+            prior=prior,
+            model_timestep_fn=_model_timestep,
+        )
+        xt, drgd_log = run_drgd_refinement(
+            xt,
+            adapter,
+            self.classifier,
+            n_steps=n_drgd,
+            step_size=drgd_gamma,
+            t=drgd_t,
+            alpha=drgd_alpha,
+            sigma=drgd_sigma,
+            prior=prior,
+            condition_cg=condition_cg,
+            preserve_history=preserve_history,
+        )
+
+        log: dict = {"drgd_model_calls": drgd_log.get("drgd_model_calls", 0)}
+        if preserve_history and "drgd_history" in drgd_log:
+            # DRGD-only: store trajectory once (avoid duplicate append in viz).
+            log["sample_history"] = drgd_log["drgd_history"]
+
+        if self.classifier is not None:
+            with torch.no_grad():
+                t0 = torch.zeros((n_samples,), dtype=torch.long, device=self.device)
+                log["log_p"] = self.classifier.logp(xt, t0, condition_cg)
+
+        if self.clip_pred:
+            xt = xt.clip(self.x_min, self.x_max)
+
+        return xt, log
+
     def sample(
             self,
             # ---------- the known fixed portion ---------- #
@@ -475,6 +699,15 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             optimization_guidance_last_steps: int = 10,
             optimization_guidance_alpha_sigma_scale: bool = False,
             ddim_eta: float = 0.0,
+            ggdm_interval: float = 0.0,
+            ggdm_obs_noise_sigma: float = 0.1,
+            ggdm_beta_coef: float = 1.0,
+            ggdm_beta_constant: Optional[float] = None,
+            ggdm_rounds: int = 0,
+            ggdm_round_seed: Optional[int] = None,
+            drgd_steps: int = 0,
+            drgd_gamma: float = 0.001,
+            drgd_noise_index: int = 5,
             # ----------- Diffusion-X sampling ----------
             diffusion_x_sampling_steps: int = 0,
             # ----------- Warm-Starting -----------
@@ -536,24 +769,89 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             The log dictionary.
         """
         assert solver in SUPPORTED_SOLVERS, f"Solver {solver} is not supported."
+        initial_xt = kwargs.pop("initial_xt", None)
+        ggdm_query_xt = kwargs.pop("ggdm_query_xt", None)
+        landing_mode = guidance_mode == "drgd"
+        ggdm_mode = should_apply_ggdm_guidance(guidance_mode, ggdm_interval)
+        if landing_mode and drgd_steps > 0 and self.classifier is not None:
+            validate_guidance_config("drgd", w_cg, optimization_guidance_scale)
+            with torch.set_grad_enabled(requires_grad):
+                condition_vec_cg = condition_cg
+            return self._sample_drgd_only(
+                prior,
+                initial_xt=initial_xt,
+                n_samples=n_samples,
+                sample_steps=sample_steps,
+                sample_step_schedule=sample_step_schedule,
+                use_ema=use_ema,
+                temperature=temperature,
+                drgd_steps=drgd_steps,
+                drgd_gamma=drgd_gamma,
+                drgd_noise_index=drgd_noise_index,
+                condition_cg=condition_vec_cg,
+                preserve_history=preserve_history,
+            )
+        if (
+            guidance_mode in ("ggdm_g_loss", "ggdm_g_loss_mean")
+            and ggdm_rounds > 0
+            and self.classifier is not None
+        ):
+            sample_kwargs = dict(
+                solver=solver,
+                n_samples=n_samples,
+                sample_steps=sample_steps,
+                sample_step_schedule=sample_step_schedule,
+                use_ema=use_ema,
+                temperature=temperature,
+                condition_cfg=condition_cfg,
+                mask_cfg=mask_cfg,
+                w_cfg=w_cfg,
+                condition_cg=condition_cg,
+                guidance_mode=guidance_mode,
+                optimization_guidance_last_steps=optimization_guidance_last_steps,
+                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale,
+                ddim_eta=ddim_eta,
+                ggdm_interval=ggdm_interval,
+                ggdm_obs_noise_sigma=ggdm_obs_noise_sigma,
+                ggdm_beta_coef=ggdm_beta_coef,
+                ggdm_beta_constant=ggdm_beta_constant,
+                drgd_steps=drgd_steps,
+                drgd_gamma=drgd_gamma,
+                drgd_noise_index=drgd_noise_index,
+                diffusion_x_sampling_steps=diffusion_x_sampling_steps,
+                warm_start_reference=warm_start_reference,
+                warm_start_forward_level=warm_start_forward_level,
+            )
+            return self._sample_ggdm_algorithm1(
+                prior,
+                guided_rounds=ggdm_rounds,
+                initial_xt=initial_xt,
+                ggdm_round_seed=ggdm_round_seed,
+                preserve_history=preserve_history,
+                sample_kwargs=sample_kwargs,
+            )
+        validate_guidance_config(guidance_mode, w_cg, optimization_guidance_scale)
 
         # ===================== Initialization =====================
-        log = {
-            "sample_history": np.empty((n_samples, sample_steps + 1, *prior.shape)) if preserve_history else None, }
+        log = {"sample_history": None}
 
         model = self.model if not use_ema else self.model_ema
 
         prior = prior.to(self.device)
-        if isinstance(warm_start_reference, torch.Tensor):
+        if initial_xt is not None:
+            xt = initial_xt.to(self.device)
+            diffusion_steps = self.diffusion_steps
+        elif isinstance(warm_start_reference, torch.Tensor):
             diffusion_steps = int(warm_start_forward_level * self.diffusion_steps)
             fwd_alpha, fwd_sigma = self.alpha[diffusion_steps], self.sigma[diffusion_steps]
             xt = warm_start_reference * fwd_alpha + fwd_sigma * torch.randn_like(warm_start_reference)
         else:
             diffusion_steps = self.diffusion_steps
-            xt = torch.randn_like(prior) * temperature
+            xt = torch.randn((n_samples, *prior.shape[1:]), device=self.device) * temperature
         xt = xt * (1. - self.fix_mask) + prior * self.fix_mask
         if preserve_history:
-            log["sample_history"][:, 0] = xt.cpu().numpy()
+            log["sample_history"] = np.empty((xt.shape[0], sample_steps + 1, *xt.shape[1:]))
+            log["sample_history"][:, 0] = xt.detach().cpu().numpy()
 
         with torch.set_grad_enabled(requires_grad):
             condition_vec_cfg = model["condition"](condition_cfg, mask_cfg) if condition_cfg is not None else None
@@ -586,6 +884,32 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
         stds = torch.zeros((sample_steps + 1,), device=self.device)
         stds[1:] = sigmas[:-1] / sigmas[1:] * (1 - (alphas[1:] / alphas[:-1]) ** 2).sqrt()
 
+        ggdm_target_y = None
+        ggdm_g_anchor = None
+        if ggdm_mode and self.classifier is not None:
+            if ggdm_query_xt is None:
+                raise ValueError(
+                    "ggdm_g_loss requires a landed query sample (ggdm_query_xt) from a "
+                    "prior unguided pass. Set ggdm_rounds > 0 to run GGDM Algorithm 1."
+                )
+            anchor_xt = ggdm_query_xt
+            if guidance_mode == "ggdm_g_loss_mean":
+                ggdm_target_y, ggdm_g_anchor = compute_ggdm_anchor_mean(
+                    anchor_xt,
+                    self.classifier,
+                    ggdm_interval=ggdm_interval,
+                    condition_cg=condition_vec_cg,
+                    fix_mask=self.fix_mask,
+                )
+            else:
+                ggdm_target_y, ggdm_g_anchor = compute_ggdm_anchor(
+                    anchor_xt,
+                    self.classifier,
+                    ggdm_interval=ggdm_interval,
+                    condition_cg=condition_vec_cg,
+                    fix_mask=self.fix_mask,
+                )
+
         buffer = []
 
         # ===================== Denoising Loop ========================
@@ -613,14 +937,26 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
                 prior=prior, guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale,
                 apply_optimization_guidance=use_opt_guidance,
-                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale)
+                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale,
+                ggdm_interval=ggdm_interval,
+                ggdm_obs_noise_sigma=ggdm_obs_noise_sigma,
+                ggdm_beta_coef=ggdm_beta_coef,
+                ggdm_beta_constant=ggdm_beta_constant,
+                ggdm_target_y=ggdm_target_y,
+                ggdm_g_anchor=ggdm_g_anchor)
 
-            # clip the prediction
-            pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])
+            pred = self.clip_prediction(
+                pred, x_eval, alphas[i], sigmas[i], as_noise=ggdm_mode
+            )
 
-            # π_t(x) = E[x_0|x]: evaluate at x_eval (x_t, or x_t+η∇R in optimization mode)
-            eps_theta = pred if self.predict_noise else xtheta_to_epstheta(x_eval, alphas[i], sigmas[i], pred)
-            x_theta = compute_pi_t(x_eval, pred, self.predict_noise, alphas[i], sigmas[i])
+            if ggdm_mode:
+                eps_theta = pred
+                x_theta = (x_eval - sigmas[i] * eps_theta) / alphas[i]
+            else:
+                eps_theta = pred if self.predict_noise else xtheta_to_epstheta(
+                    x_eval, alphas[i], sigmas[i], pred
+                )
+                x_theta = compute_pi_t(x_eval, pred, self.predict_noise, alphas[i], sigmas[i])
 
             # one-step update (native VP solvers; optimization only changes where π_t is evaluated)
             if solver == "ddpm":
@@ -683,7 +1019,7 @@ class DiscreteDiffusionSDE(BaseDiffusionSDE):
             # fix the known portion, and preserve the sampling history
             xt = xt * (1. - self.fix_mask) + prior * self.fix_mask
             if preserve_history:
-                log["sample_history"][:, sample_steps - i + 1] = xt.cpu().numpy()
+                log["sample_history"][:, sample_steps - i + 1] = xt.detach().cpu().numpy()
 
         # ================= Post-processing =================
         if self.classifier is not None:
@@ -932,7 +1268,7 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             xt = torch.randn_like(prior) * temperature
         xt = xt * (1. - self.fix_mask) + prior * self.fix_mask
         if preserve_history:
-            log["sample_history"][:, 0] = xt.cpu().numpy()
+            log["sample_history"][:, 0] = xt.detach().cpu().numpy()
 
         with torch.set_grad_enabled(requires_grad):
             condition_vec_cfg = model["condition"](condition_cfg, mask_cfg) if condition_cfg is not None else None
@@ -962,6 +1298,9 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
         stds = torch.zeros((sample_steps + 1,), device=self.device)
         stds[1:] = sigmas[:-1] / sigmas[1:] * (1 - (alphas[1:] / alphas[:-1]) ** 2).sqrt()
 
+        ggdm_target_y = None
+        ggdm_g_anchor = None
+
         buffer = []
 
         # ===================== Denoising Loop ========================
@@ -984,7 +1323,12 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
                 prior=prior, guidance_mode=guidance_mode,
                 optimization_guidance_scale=optimization_guidance_scale,
                 apply_optimization_guidance=use_opt_guidance,
-                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale)
+                optimization_guidance_alpha_sigma_scale=optimization_guidance_alpha_sigma_scale,
+                ggdm_interval=ggdm_interval,
+                ggdm_obs_noise_sigma=ggdm_obs_noise_sigma,
+                ggdm_beta_coef=ggdm_beta_coef,
+                ggdm_target_y=ggdm_target_y,
+                ggdm_g_anchor=ggdm_g_anchor)
 
             # clip the prediction
             pred = self.clip_prediction(pred, x_eval, alphas[i], sigmas[i])
@@ -1054,7 +1398,7 @@ class ContinuousDiffusionSDE(BaseDiffusionSDE):
             # fix the known portion, and preserve the sampling history
             xt = xt * (1. - self.fix_mask) + prior * self.fix_mask
             if preserve_history:
-                log["sample_history"][:, sample_steps - i + 1] = xt.cpu().numpy()
+                log["sample_history"][:, sample_steps - i + 1] = xt.detach().cpu().numpy()
 
         # ================= Post-processing =================
         if self.classifier is not None and w_cg != 0.:

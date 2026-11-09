@@ -56,6 +56,17 @@ OPT_CONFIGS=(
   optimization_scale_40
 )
 
+BASELINE_CONFIGS=(
+  drgd
+  ggdm_g_loss
+)
+
+DRGD_STEPS="${DRGD_STEPS:-${SAMPLING_STEPS}}"
+DRGD_GAMMAS=(5 10 15 20)
+GGDM_ROUNDS="${GGDM_ROUNDS:-10}"
+GGDM_INTERVAL="${GGDM_INTERVAL:-0.05}"
+GGDM_BETA_COEF="${GGDM_BETA_COEF:-0.5}"
+
 cd "${REPO_DIR}"
 export PYTHONPATH="${REPO_DIR}/pipelines:${REPO_DIR}:${PYTHONPATH:-}"
 export D4RL_SUPPRESS_IMPORT_ERROR=1
@@ -81,6 +92,7 @@ echo "checkpoint: ${CKPT_PATH}"
 echo "trajectories: ${TRAJECTORIES[*]}"
 echo "w_cg configs: ${WCG_CONFIGS[*]}"
 echo "opt configs: ${OPT_CONFIGS[*]} (last_steps=${OPT_GUIDANCE_LAST_STEPS}, diffusion_steps=100)"
+echo "baseline configs: drgd (steps=${DRGD_STEPS}, gammas=${DRGD_GAMMAS[*]}), ggdm_g_loss (rounds=${GGDM_ROUNDS})"
 echo "output: ${OUTPUT_ROOT}"
 
 for traj in "${TRAJECTORIES[@]}"; do
@@ -105,6 +117,37 @@ for traj in "${TRAJECTORIES[@]}"; do
       --diffusion-steps 100 \
       --training-diffusion-steps 20 \
       --optimization-guidance-last-steps "${OPT_GUIDANCE_LAST_STEPS}" \
+      --output-dir "${OUTPUT_ROOT}/${traj}/${cfg}"
+  done
+
+  for gamma in "${DRGD_GAMMAS[@]}"; do
+    echo ""
+    echo "========== ${traj} | drgd | gamma=${gamma} =========="
+    "${PYTHON}" pipelines/unicycle_eval.py \
+      "${COMMON_ARGS[@]}" \
+      --reference-name "${traj}" \
+      --heart-config-names drgd \
+      --diffusion-steps 20 \
+      --training-diffusion-steps 20 \
+      --drgd-steps "${DRGD_STEPS}" \
+      --drgd-gamma "${gamma}" \
+      --drgd-noise-index -1 \
+      --output-dir "${OUTPUT_ROOT}/${traj}/drgd_gamma${gamma}"
+  done
+
+  for cfg in ggdm_g_loss; do
+    echo ""
+    echo "========== ${traj} | ${cfg} =========="
+    "${PYTHON}" pipelines/unicycle_eval.py \
+      "${COMMON_ARGS[@]}" \
+      --reference-name "${traj}" \
+      --heart-config-names "${cfg}" \
+      --diffusion-steps 20 \
+      --training-diffusion-steps 20 \
+      --ggdm-solver ddpm \
+      --ggdm-rounds "${GGDM_ROUNDS}" \
+      --ggdm-interval "${GGDM_INTERVAL}" \
+      --ggdm-beta-coef "${GGDM_BETA_COEF}" \
       --output-dir "${OUTPUT_ROOT}/${traj}/${cfg}"
   done
 done

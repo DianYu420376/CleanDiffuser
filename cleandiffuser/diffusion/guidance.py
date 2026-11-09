@@ -8,7 +8,14 @@ import torch
 
 from cleandiffuser.utils import at_least_ndim
 
-SUPPORTED_GUIDANCE_MODES = ("standard", "optimization", "hybrid")
+SUPPORTED_GUIDANCE_MODES = (
+    "standard",
+    "optimization",
+    "hybrid",
+    "ggdm_g_loss",
+    "ggdm_g_loss_mean",
+    "drgd",
+)
 
 
 def should_apply_optimization_guidance(
@@ -76,6 +83,15 @@ def validate_guidance_config(
             "guidance_mode='hybrid' requires at least one of w_cg or "
             "optimization_guidance_scale to be non-zero."
         )
+    if guidance_mode in ("ggdm_g_loss", "ggdm_g_loss_mean") and w_cg != 0.0:
+        raise ValueError(
+            f"guidance_mode={guidance_mode!r} is incompatible with w_cg != 0."
+        )
+    if guidance_mode == "drgd" and (w_cg != 0.0 or optimization_guidance_scale != 0.0):
+        raise ValueError(
+            "guidance_mode='drgd' runs DRGD-only refinement from initial noise; "
+            "set w_cg=0 and optimization_guidance_scale=0."
+        )
 
 
 def compute_reward_gradient(
@@ -85,7 +101,7 @@ def compute_reward_gradient(
     condition_cg=None,
     fix_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-    """Return detached reward gradient ∇_x log R(x_t) used for input shifting."""
+    """Return detached raw reward gradient ∇R (RuntimeRewardClassifier) for guidance."""
     log_p, grad = classifier.gradients(xt.clone(), t, condition_cg)
     grad = grad.detach()
     if fix_mask is not None:

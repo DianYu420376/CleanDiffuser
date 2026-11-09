@@ -67,6 +67,25 @@ def _optimization_config(name: str) -> dict | None:
     }
 
 
+def _baseline_config(name: str) -> dict | None:
+    """Parse baseline names: drgd, ggdm_g_loss."""
+    if name == "drgd":
+        return {
+            "name": name,
+            "guidance_mode": "drgd",
+            "optimization_guidance_scale": 0.0,
+            "w_cg": 0.0,
+        }
+    if name in ("ggdm_g_loss", "ggdm"):
+        return {
+            "name": "ggdm_g_loss",
+            "guidance_mode": "ggdm_g_loss",
+            "optimization_guidance_scale": 0.0,
+            "w_cg": 0.0,
+        }
+    return None
+
+
 def build_configs(
     opt_scales: list[float],
     include_monte_carlo: bool = False,
@@ -93,7 +112,7 @@ def build_configs(
         for name in config_names:
             if name in {cfg["name"] for cfg in configs}:
                 continue
-            parsed = _standard_w_cg_config(name) or _optimization_config(name)
+            parsed = _standard_w_cg_config(name) or _optimization_config(name) or _baseline_config(name)
             if parsed is not None:
                 extra_configs.append(parsed)
         configs.extend(extra_configs)
